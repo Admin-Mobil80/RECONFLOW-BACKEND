@@ -53,7 +53,7 @@ Actions OIDC provider exists — created by another product, so this app
 ### Hosting layout
 
 ```
-wingtheidea-webapps-231427841372/
+webapps.wingtheidea.com/
   RECONFLOW/
     PORTAL/   ->  https://reconflow.wingtheidea.com
     BMS/      ->  https://bms.reconflow.wingtheidea.com
@@ -64,7 +64,7 @@ One bucket, one folder per app, one CloudFront distribution per app with
 list **only its own prefix**, so a runaway `s3 sync --delete` cannot reach a
 sibling app.
 
-The bucket is named `wingtheidea-webapps-231427841372`, not
+The bucket is named `webapps.wingtheidea.com`, not
 `webapps.wingtheidea.com`: a bucket name containing dots cannot be reached over
 HTTPS in virtual-hosted style — S3's wildcard certificate
 `*.s3.<region>.amazonaws.com` matches a single label — which breaks CloudFront's

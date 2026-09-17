@@ -33,15 +33,16 @@ export const HOSTED_ZONE_ID = 'Z008500039SSWYWL7HKJI';
 /**
  * Shared hosting bucket for every WingTheIdea web app, laid out by folder:
  *
- *   wingtheidea-webapps/
+ *   webapps.wingtheidea.com/
  *     RECONFLOW/
  *       PORTAL/   -> reconflow.wingtheidea.com
  *       BMS/      -> bms.reconflow.wingtheidea.com
  *
- * NOT named `webapps.wingtheidea.com`: a bucket name containing dots cannot be
- * reached over HTTPS in virtual-hosted style, because the S3 wildcard
- * certificate `*.s3.<region>.amazonaws.com` matches a single label only. That
- * breaks CloudFront's TLS connection to the origin. The hostname is supplied by
- * CloudFront and Route 53, so the bucket name is free to be dot-free.
+ * `webapps.<domain>` is the house pattern across this account —
+ * webapps.skilterco.com, webapps.bugtrakr.com, webapps.slotzapp.com and a
+ * dozen more all serve this way. The dots in the name are deliberate and
+ * work: CloudFront reaches the S3 REST endpoint with OAC, and those
+ * distributions are Deployed and serving 200. Do not "fix" this to a dot-free
+ * name.
  */
-export const WEBAPPS_BUCKET_NAME = `wingtheidea-webapps-${ACCOUNT}`;
+export const WEBAPPS_BUCKET_NAME = 'webapps.wingtheidea.com';
