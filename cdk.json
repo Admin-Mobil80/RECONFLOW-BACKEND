@@ -19,6 +19,7 @@
   "context": {
     "@aws-cdk/aws-iam:minimizePolicies": true,
     "@aws-cdk/core:checkSecretUsage": true,
-    "@aws-cdk/aws-s3:createDefaultLoggingPolicy": true
+    "@aws-cdk/aws-s3:createDefaultLoggingPolicy": true,
+    "Construct-Annotations::@aws-cdk/aws-cloudfront-origins:updateImportedBucketPolicyOac": true
   }
 }

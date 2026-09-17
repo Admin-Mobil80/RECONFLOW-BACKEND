@@ -1,85 +1,107 @@
 import * as cdk from 'aws-cdk-lib';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as targets from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
-import { GITHUB_OIDC_PROVIDER_ARN, PREFIX } from './account';
+import {
+  GITHUB_OIDC_PROVIDER_ARN,
+  HOSTED_ZONE_ID,
+  PREFIX,
+  WEBAPPS_BUCKET_NAME,
+  ZONE_NAME,
+} from './account';
 
 export interface StaticSiteStackProps extends cdk.StackProps {
-  /** Short app name, lowercase — becomes part of every resource name (`portal`, `bms`). */
+  /** Short app name, lowercase — used in resource names (`portal`, `bms`). */
   readonly appName: string;
   /** `owner/repo` of the GitHub repository allowed to deploy this site. */
   readonly githubRepo: string;
+  /** Public hostname, e.g. `reconflow.wingtheidea.com`. */
+  readonly domainName: string;
+  /** Folder in the shared bucket, no leading or trailing slash: `RECONFLOW/PORTAL`. */
+  readonly sitePrefix: string;
+  /** Certificate for `domainName`, from the us-east-1 certificates stack. */
+  readonly certificate: acm.ICertificate;
 }
 
 /**
- * One ReconFlow frontend: a private S3 bucket served through CloudFront with
- * Origin Access Control, plus the GitHub Actions deploy role for exactly one
- * repo.
- *
- * One stack per frontend, so PORTAL and BMS deploy, roll back and fail
- * independently, and each repo's role can reach only its own bucket and
- * distribution.
+ * One web app: a CloudFront distribution serving a folder of the shared
+ * hosting bucket at its own hostname, plus the GitHub Actions deploy role for
+ * exactly one repo and one folder.
  */
 export class StaticSiteStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: StaticSiteStackProps) {
     super(scope, id, props);
 
-    const { appName, githubRepo } = props;
+    const { appName, githubRepo, domainName, sitePrefix, certificate } = props;
 
-    // Bucket names are globally unique, so the account id is part of the name.
-    const bucket = new s3.Bucket(this, 'SiteBucket', {
-      bucketName: `${PREFIX}-${appName}-site-${this.account}`,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      enforceSSL: true,
-      minimumTLSVersion: 1.2,
-      // RETAIN: in a shared account an accidental `cdk destroy` must not be
-      // able to take the site's contents with it.
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
-
-    const securityHeaders = new cloudfront.ResponseHeadersPolicy(this, 'SecurityHeaders', {
-      responseHeadersPolicyName: `${PREFIX}-${appName}-security-headers`,
-      securityHeadersBehavior: {
-        contentTypeOptions: { override: true },
-        frameOptions: { frameOption: cloudfront.HeadersFrameOption.DENY, override: true },
-        referrerPolicy: {
-          referrerPolicy: cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
-          override: true,
-        },
-        strictTransportSecurity: {
-          accessControlMaxAge: cdk.Duration.days(365),
-          includeSubdomains: true,
-          override: true,
-        },
-      },
+    // Imported by name, NOT taken as a construct from the hosting stack. An
+    // owned bucket would make withOriginAccessControl() write a policy
+    // statement naming this distribution back into the hosting stack, which
+    // depends on nothing — that is a dependency cycle. The hosting stack
+    // already grants CloudFront read access for this account, so an imported
+    // bucket (whose policy CDK will not touch) is what this needs.
+    const bucket = s3.Bucket.fromBucketAttributes(this, 'WebappsBucket', {
+      bucketName: WEBAPPS_BUCKET_NAME,
+      region: this.region,
     });
 
     const distribution = new cloudfront.Distribution(this, 'SiteDistribution', {
-      comment: `${PREFIX}-${appName}`,
+      comment: `${PREFIX}-${appName} (${domainName})`,
+      domainNames: [domainName],
+      certificate,
       defaultRootObject: 'index.html',
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       // PRICE_CLASS_100 excludes India; this audience is served from ap-south-1.
       priceClass: cloudfront.PriceClass.PRICE_CLASS_200,
+      minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
       defaultBehavior: {
-        // withOriginAccessControl keeps the bucket private and writes the
-        // bucket policy that lets only this distribution read it.
-        origin: origins.S3BucketOrigin.withOriginAccessControl(bucket),
+        // originPath makes this distribution see only its own folder: a request
+        // for /assets/x.js is fetched as /<sitePrefix>/assets/x.js.
+        origin: origins.S3BucketOrigin.withOriginAccessControl(bucket, {
+          originPath: `/${sitePrefix}`,
+        }),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
         cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-        responseHeadersPolicy: securityHeaders,
+        responseHeadersPolicy: new cloudfront.ResponseHeadersPolicy(this, 'SecurityHeaders', {
+          responseHeadersPolicyName: `${PREFIX}-${appName}-security-headers`,
+          securityHeadersBehavior: {
+            contentTypeOptions: { override: true },
+            frameOptions: { frameOption: cloudfront.HeadersFrameOption.DENY, override: true },
+            referrerPolicy: {
+              referrerPolicy: cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
+              override: true,
+            },
+            strictTransportSecurity: {
+              accessControlMaxAge: cdk.Duration.days(365),
+              includeSubdomains: true,
+              override: true,
+            },
+          },
+        }),
         compress: true,
       },
       // Client-side routing: unknown paths are app routes, not missing files.
-      // S3 answers 403 (not 404) for a key that does not exist in a private bucket.
+      // A private bucket answers 403 (not 404) for a key that does not exist.
       errorResponses: [
         { httpStatus: 403, responseHttpStatus: 200, responsePagePath: '/index.html', ttl: cdk.Duration.minutes(5) },
         { httpStatus: 404, responseHttpStatus: 200, responsePagePath: '/index.html', ttl: cdk.Duration.minutes(5) },
       ],
     });
+
+    const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', {
+      hostedZoneId: HOSTED_ZONE_ID,
+      zoneName: ZONE_NAME,
+    });
+    const aliasTarget = route53.RecordTarget.fromAlias(new targets.CloudFrontTarget(distribution));
+
+    new route53.ARecord(this, 'AliasRecord', { zone, recordName: domainName, target: aliasTarget });
+    new route53.AaaaRecord(this, 'AliasRecordV6', { zone, recordName: domainName, target: aliasTarget });
 
     const githubProvider = iam.OpenIdConnectProvider.fromOpenIdConnectProviderArn(
       this,
@@ -89,7 +111,7 @@ export class StaticSiteStack extends cdk.Stack {
 
     const deployRole = new iam.Role(this, 'GithubDeployRole', {
       roleName: `${PREFIX}-${appName}-github-deploy`,
-      description: `GitHub Actions deploy role for ${githubRepo} (ReconFlow ${appName})`,
+      description: `GitHub Actions deploy role for ${githubRepo} (${domainName})`,
       maxSessionDuration: cdk.Duration.hours(1),
       assumedBy: new iam.WebIdentityPrincipal(githubProvider.openIdConnectProviderArn, {
         StringEquals: {
@@ -104,25 +126,28 @@ export class StaticSiteStack extends cdk.Stack {
       }),
     });
 
-    // Written out explicitly rather than via bucket.grantReadWrite(), so the
-    // role's reach in a shared admin account is readable at a glance.
+    // The bucket is shared with every other web app, so the role is confined to
+    // this app's folder. The s3:prefix condition matters as much as the object
+    // ARNs: without it the role could LIST a sibling app's folder, and
+    // `aws s3 sync --delete` acts on what it lists.
     deployRole.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'ListSiteBucket',
+        sid: 'ListOwnFolderOnly',
         actions: ['s3:ListBucket'],
         resources: [bucket.bucketArn],
+        conditions: { StringLike: { 's3:prefix': [`${sitePrefix}/*`, sitePrefix] } },
       }),
     );
     deployRole.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'WriteSiteObjects',
+        sid: 'WriteOwnFolderOnly',
         actions: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'],
-        resources: [bucket.arnForObjects('*')],
+        resources: [bucket.arnForObjects(`${sitePrefix}/*`)],
       }),
     );
     deployRole.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'InvalidateSiteCache',
+        sid: 'InvalidateOwnDistributionOnly',
         actions: ['cloudfront:CreateInvalidation', 'cloudfront:GetInvalidation'],
         resources: [`arn:aws:cloudfront::${this.account}:distribution/${distribution.distributionId}`],
       }),
@@ -133,6 +158,10 @@ export class StaticSiteStack extends cdk.Stack {
       value: bucket.bucketName,
       description: `Set as repo variable S3_BUCKET in ${githubRepo}`,
     });
+    new cdk.CfnOutput(this, 'S3Prefix', {
+      value: sitePrefix,
+      description: `Set as repo variable S3_PREFIX in ${githubRepo}`,
+    });
     new cdk.CfnOutput(this, 'AwsDeployRoleArn', {
       value: deployRole.roleArn,
       description: `Set as repo variable AWS_DEPLOY_ROLE_ARN in ${githubRepo}`,
@@ -142,8 +171,8 @@ export class StaticSiteStack extends cdk.Stack {
       description: `Set as repo variable CLOUDFRONT_DISTRIBUTION_ID in ${githubRepo}`,
     });
     new cdk.CfnOutput(this, 'SiteUrl', {
-      value: `https://${distribution.distributionDomainName}`,
-      description: 'CloudFront URL until a custom subdomain is attached',
+      value: `https://${domainName}`,
+      description: 'Public URL (Route 53 alias to this distribution)',
     });
   }
 }
