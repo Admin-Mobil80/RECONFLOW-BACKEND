@@ -45,7 +45,6 @@ Actions OIDC provider exists — created by another product, so this app
 
 | Stack | Region | Contents |
 | --- | --- | --- |
-| `wingtheidea-webapps` | ap-south-1 | The shared bucket every WingTheIdea web app is served from, plus its CloudFront read policy |
 | `reconflow-certificates` | us-east-1 | ACM certificates for the ReconFlow hostnames (CloudFront accepts certificates only from us-east-1) |
 | `reconflow-portal` | ap-south-1 | CloudFront + Route 53 for `reconflow.wingtheidea.com`, and RECONFLOW-PORTAL's deploy role |
 | `reconflow-bms` | ap-south-1 | CloudFront + Route 53 for `bms.reconflow.wingtheidea.com`, and RECONFLOW-BMS's deploy role |
@@ -64,19 +63,33 @@ One bucket, one folder per app, one CloudFront distribution per app with
 list **only its own prefix**, so a runaway `s3 sync --delete` cannot reach a
 sibling app.
 
-The bucket is named `webapps.wingtheidea.com`, not
-`webapps.wingtheidea.com`: a bucket name containing dots cannot be reached over
-HTTPS in virtual-hosted style — S3's wildcard certificate
-`*.s3.<region>.amazonaws.com` matches a single label — which breaks CloudFront's
-TLS connection to the origin. The public hostnames come from CloudFront and
-Route 53.
+`webapps.<domain>` is the established pattern across this account —
+`webapps.skilterco.com`, `webapps.bugtrakr.com`, `webapps.slotzapp.com` and a
+dozen others are laid out identically, each distribution pointing at a folder
+with `OriginPath`. The dots in the bucket name are fine in this setup: those
+distributions are Deployed and their sites return 200.
 
-The shared bucket grants CloudFront read access at the account level rather than
-per distribution, because the distributions live in the app stacks; a
-per-distribution policy would make the shared stack depend on every app stack
-that depends on it. App stacks therefore import the bucket by name, and CDK
-correctly warns that it will not manage an imported bucket's policy — that
-warning is acknowledged in `cdk.json`.
+### The bucket is owned by another stack
+
+`webapps.wingtheidea.com` is **not** declared by this app. It already exists and
+belongs to the CloudFormation stack `WingTheIdeaSite`, whose source is
+`WingTheIdea/LANDINGPAGE/infra` — the umbrella landing page, which serves from
+the `LANDINGPAGE/` folder of the same bucket. These stacks import it by name.
+
+A bucket has exactly one policy, so this app must not declare an
+`AWS::S3::BucketPolicy` for it either: two stacks would overwrite each other's
+version. That means **the owning stack has to grant CloudFront read access for
+ReconFlow's distributions.** As created, its policy allows only its own
+distribution, via an `AWS:SourceArn` condition. Until it is widened, the
+ReconFlow distributions will get 403 from S3.
+
+The durable fix is one edit in `WingTheIdea/LANDINGPAGE/infra`: switch that
+statement's condition from `AWS:SourceArn` (one distribution) to
+`AWS:SourceAccount` (any distribution in this account), so every future app
+added to the bucket works without touching the policy again.
+
+CDK warns that it will not manage an imported bucket's policy; that warning is
+expected here and acknowledged in `cdk.json`.
 
 ## Usage
 
