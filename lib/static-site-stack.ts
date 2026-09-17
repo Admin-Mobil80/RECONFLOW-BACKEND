@@ -103,6 +103,11 @@ export class StaticSiteStack extends cdk.Stack {
     new route53.ARecord(this, 'AliasRecord', { zone, recordName: domainName, target: aliasTarget });
     new route53.AaaaRecord(this, 'AliasRecordV6', { zone, recordName: domainName, target: aliasTarget });
 
+    const [githubOwner, githubRepoName] = githubRepo.split('/');
+    if (!githubOwner || !githubRepoName) {
+      throw new Error(`githubRepo must be "owner/repo", got "${githubRepo}"`);
+    }
+
     const githubProvider = iam.OpenIdConnectProvider.fromOpenIdConnectProviderArn(
       this,
       'GithubOidcProvider',
@@ -117,11 +122,24 @@ export class StaticSiteStack extends cdk.Stack {
         StringEquals: {
           'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com',
         },
-        // Scoped to one repo, any ref. Tighten to
-        // `repo:${githubRepo}:ref:refs/heads/main` once nothing else needs to
-        // deploy, or to `:environment:production` if a GitHub environment gates it.
+        // Two forms, because this GitHub organisation uses a CUSTOMISED OIDC
+        // subject claim. The standard subject is
+        //   repo:<owner>/<repo>:ref:refs/heads/main
+        // but tokens from this org arrive with numeric ids attached:
+        //   repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/main
+        // Allowing only the standard form fails with "Not authorized to perform
+        // sts:AssumeRoleWithWebIdentity". The ids are wildcarded so the role
+        // survives the claim template being changed back, exactly as the
+        // cloudmeter and flaunt roles in this account do.
+        //
+        // Scoped to one repo, any ref. Tighten to `:ref:refs/heads/main` once
+        // nothing else needs to deploy, or to `:environment:production` if a
+        // GitHub environment gates it.
         StringLike: {
-          'token.actions.githubusercontent.com:sub': `repo:${githubRepo}:*`,
+          'token.actions.githubusercontent.com:sub': [
+            `repo:${githubRepo}:*`,
+            `repo:${githubOwner}@*/${githubRepoName}@*:*`,
+          ],
         },
       }),
     });
