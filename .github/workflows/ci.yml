@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  synth:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm test
+
+      # The app pins account and region explicitly, so synth needs no AWS
+      # credentials. Deploys are run by hand (`npm run deploy`) — per the
+      # project rules, AWS resources are only ever created by CDK, and no
+      # CI role is granted CloudFormation access in this shared account.
+      - name: Synth
+        run: npx cdk synth --quiet
