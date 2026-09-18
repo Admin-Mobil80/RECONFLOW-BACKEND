@@ -12,9 +12,10 @@
 
 import { AdminCreateUserCommand, CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import type { LambdaFunctionURLEvent, LambdaFunctionURLResult } from "aws-lambda";
+import { isKnownCurrency } from "../domain/currencies";
 import type { Organisation } from "../domain/types";
 
 const CORE_TABLE = process.env.CORE_TABLE!;
@@ -104,7 +105,7 @@ async function createOrganisation(body: Record<string, unknown>): Promise<Organi
 
   if (!SLUG_RE.test(organisationId)) throw new HttpError(400, "Identifier must be 2–32 lowercase letters, digits or hyphens, starting with a letter.");
   if (!name || name.length > 120) throw new HttpError(400, "Name is required (up to 120 characters).");
-  if (!/^[A-Z]{3}$/.test(baseCurrency)) throw new HttpError(400, "Base currency must be a three-letter ISO code.");
+  if (!isKnownCurrency(baseCurrency)) throw new HttpError(400, "Base currency must be one of the supported currencies.");
   if (!EMAIL_RE.test(ownerEmail) || ownerEmail.length > 320) throw new HttpError(400, "Owner email looks invalid.");
   if (!ownerName || ownerName.length > 120) throw new HttpError(400, "Owner name is required (up to 120 characters).");
 
@@ -118,22 +119,30 @@ async function createOrganisation(body: Record<string, unknown>): Promise<Organi
     createdAt,
   };
 
-  // The profile is the source of truth and refuses to overwrite an existing
-  // organisation; the listing item is written only once that succeeds.
-  try {
-    await dynamo.send(
-      new PutCommand({
-        TableName: CORE_TABLE,
-        Item: { PK: `ORG#${organisationId}`, SK: "PROFILE", ...profile },
-        ConditionExpression: "attribute_not_exists(PK)",
-      }),
-    );
-  } catch (error) {
-    if ((error as { name?: string }).name === "ConditionalCheckFailedException") {
-      throw new HttpError(409, `An organisation with identifier "${organisationId}" already exists.`);
-    }
-    throw error;
+  // The profile is the source of truth. An organisation that already has an
+  // owner is never overwritten; one that exists without an owner - the
+  // representative tenant is seeded that way - is completed by this call.
+  const existing = await dynamo.send(
+    new GetCommand({ TableName: CORE_TABLE, Key: { PK: `ORG#${organisationId}`, SK: "PROFILE" } }),
+  );
+  const existingOwner = existing.Item?.ownerEmail as string | undefined;
+  if (existingOwner && !existingOwner.startsWith("(seeded")) {
+    throw new HttpError(409, `An organisation with identifier "${organisationId}" already exists.`);
   }
+  await dynamo.send(
+    new PutCommand({
+      TableName: CORE_TABLE,
+      Item: {
+        PK: `ORG#${organisationId}`,
+        SK: "PROFILE",
+        ...(existing.Item ?? {}),
+        ...profile,
+        // Keep what the seed configured; only the owner and names are new.
+        interfaces: existing.Item?.interfaces ?? profile.interfaces,
+        createdAt: (existing.Item?.createdAt as string | undefined) ?? createdAt,
+      },
+    }),
+  );
   await dynamo.send(
     new PutCommand({
       TableName: CORE_TABLE,
