@@ -62,8 +62,11 @@ function json(statusCode: number, body: unknown): LambdaFunctionURLResult {
 }
 
 async function requireRoot(event: LambdaFunctionURLEvent): Promise<void> {
-  const header = event.headers.authorization ?? event.headers.Authorization ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  // The token arrives in x-id-token, not Authorization: CloudFront replaces
+  // Authorization with its own SigV4 signature for the function URL. The
+  // Bearer form is accepted too, for direct invocation in tests.
+  const bearer = event.headers.authorization ?? "";
+  const token = event.headers["x-id-token"] ?? (bearer.startsWith("Bearer ") ? bearer.slice(7) : "");
   if (!token) throw new HttpError(401, "Sign in to use the BMS.");
   let claims: Record<string, unknown>;
   try {
