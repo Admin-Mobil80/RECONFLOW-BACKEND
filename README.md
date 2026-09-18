@@ -46,7 +46,7 @@ Actions OIDC provider exists — created by another product, so this app
 | Stack | Region | Contents |
 | --- | --- | --- |
 | `reconflow-data` | ap-south-1 | ReconFlow's core table and documents bucket (retained), plus the five representative source tables for the proof of concept, seeded by a CloudFormation custom resource |
-| `reconflow-auth` | ap-south-1 | One Cognito user pool for every surface, passwordless: three Lambda triggers run the custom auth flow (six-digit code emailed as ReconFlow via SES, verified in constant time, three attempts). A client each for the portal and the BMS, and the platform root account |
+| `reconflow-auth` | ap-south-1 | Two Cognito user pools, passwordless: the portal's holds organisation accounts, the BMS's holds the platform root only, so who may sign in where is enforced by membership. Both run the same three Lambda triggers (six-digit code emailed as ReconFlow via SES, verified in constant time, three attempts) |
 | `reconflow-certificates` | us-east-1 | ACM certificates for the ReconFlow hostnames (CloudFront accepts certificates only from us-east-1) |
 | `reconflow-portal` | ap-south-1 | CloudFront + Route 53 for `reconflow.wingtheidea.com`, and RECONFLOW-PORTAL's deploy role |
 | `reconflow-bms` | ap-south-1 | CloudFront + Route 53 for `bms.reconflow.wingtheidea.com`, and RECONFLOW-BMS's deploy role |
