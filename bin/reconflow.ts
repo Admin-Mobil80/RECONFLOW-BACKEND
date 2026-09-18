@@ -1,6 +1,16 @@
 #!/usr/bin/env node
 import * as cdk from 'aws-cdk-lib';
-import { ACCOUNT, CERTIFICATE_REGION, PREFIX, REGION } from '../lib/account';
+import {
+  ACCOUNT,
+  CERTIFICATE_REGION,
+  ENQUIRIES_TO_ADDRESS,
+  MAIL_FROM_ADDRESS,
+  MAIL_FROM_NAME,
+  PREFIX,
+  REGION,
+  SES_IDENTITY_DOMAIN,
+  SES_REGION,
+} from '../lib/account';
 import { CertificatesStack } from '../lib/certificates-stack';
 import { DataStack } from '../lib/data-stack';
 import { StaticSiteStack } from '../lib/static-site-stack';
@@ -47,6 +57,14 @@ const portal = new StaticSiteStack(app, 'reconflow-portal', {
   domainName: PORTAL_DOMAIN,
   sitePrefix: 'RECONFLOW/PORTAL',
   certificate: certificates.certificates[PORTAL_DOMAIN],
+  // The public site carries the Contact Us form; the BMS is internal and does not.
+  contactForm: {
+    toAddress: ENQUIRIES_TO_ADDRESS,
+    fromAddress: MAIL_FROM_ADDRESS,
+    fromName: MAIL_FROM_NAME,
+    sesRegion: SES_REGION,
+    sesIdentityDomain: SES_IDENTITY_DOMAIN,
+  },
 });
 
 const bms = new StaticSiteStack(app, 'reconflow-bms', {

@@ -1,8 +1,12 @@
+import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as targets from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -26,6 +30,17 @@ export interface StaticSiteStackProps extends cdk.StackProps {
   readonly sitePrefix: string;
   /** Certificate for `domainName`, from the us-east-1 certificates stack. */
   readonly certificate: acm.ICertificate;
+  /** Present on the public site only: serves the Contact Us form at /api/contact. */
+  readonly contactForm?: ContactFormProps;
+}
+
+export interface ContactFormProps {
+  readonly toAddress: string;
+  readonly fromAddress: string;
+  readonly fromName: string;
+  /** Region of the verified SES identity — not necessarily this stack's region. */
+  readonly sesRegion: string;
+  readonly sesIdentityDomain: string;
 }
 
 /**
@@ -93,6 +108,8 @@ export class StaticSiteStack extends cdk.Stack {
         { httpStatus: 404, responseHttpStatus: 200, responsePagePath: '/index.html', ttl: cdk.Duration.minutes(5) },
       ],
     });
+
+    if (props.contactForm) this.addContactForm(distribution, props.contactForm);
 
     const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', {
       hostedZoneId: HOSTED_ZONE_ID,
@@ -191,6 +208,53 @@ export class StaticSiteStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'SiteUrl', {
       value: `https://${domainName}`,
       description: 'Public URL (Route 53 alias to this distribution)',
+    });
+  }
+
+  /**
+   * Contact Us handler, served from this distribution at /api/* so the form
+   * posts same-origin. The function URL requires IAM auth; only CloudFront's
+   * Origin Access Control can sign for it, so the URL is useless on its own.
+   */
+  private addContactForm(distribution: cloudfront.Distribution, config: ContactFormProps): void {
+    const fn = new NodejsFunction(this, 'ContactFunction', {
+      entry: path.join(__dirname, '../src/handlers/contact-form.ts'),
+      runtime: lambda.Runtime.NODEJS_24_X,
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 256,
+      logGroup: new logs.LogGroup(this, 'ContactFunctionLogs', {
+        retention: logs.RetentionDays.ONE_MONTH,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+      bundling: { target: 'node24', externalModules: ['@aws-sdk/*'] },
+      environment: {
+        SES_REGION: config.sesRegion,
+        FROM_ADDRESS: config.fromAddress,
+        FROM_NAME: config.fromName,
+        TO_ADDRESS: config.toAddress,
+        PRODUCT_NAME: config.fromName,
+      },
+    });
+
+    // Send only as the configured address. Without the FromAddress condition
+    // the function could send as any verified identity in this shared account.
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ses:SendEmail'],
+        resources: [`arn:aws:ses:${config.sesRegion}:${this.account}:identity/${config.sesIdentityDomain}`],
+        conditions: { StringEquals: { 'ses:FromAddress': config.fromAddress } },
+      }),
+    );
+
+    const url = fn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
+
+    distribution.addBehavior('/api/*', origins.FunctionUrlOrigin.withOriginAccessControl(url), {
+      viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+      cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+      // Forward the body and headers, but not Host: the function URL's own
+      // hostname is what its TLS certificate expects.
+      originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
     });
   }
 }

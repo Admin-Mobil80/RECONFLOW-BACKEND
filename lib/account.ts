@@ -26,6 +26,20 @@ export const PREFIX = 'reconflow';
  */
 export const GITHUB_OIDC_PROVIDER_ARN = `arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com`;
 
+/**
+ * Outbound mail. The wingtheidea.com SES identity is verified in us-east-1
+ * ONLY — SES identities are regional, and there is none in ap-south-1 — so
+ * every sender pins its SES client to this region regardless of where the
+ * function runs. The account has production access there.
+ */
+export const SES_REGION = 'us-east-1';
+export const SES_IDENTITY_DOMAIN = 'wingtheidea.com';
+export const MAIL_FROM_ADDRESS = 'no-reply@wingtheidea.com';
+/** Inboxes show the display name, so mail reads as from "ReconFlow", not a no-reply mailbox. */
+export const MAIL_FROM_NAME = 'ReconFlow';
+/** Where enquiries from the public site are delivered. */
+export const ENQUIRIES_TO_ADDRESS = 'riyad@mobil80.com';
+
 /** Pre-existing public hosted zone for wingtheidea.com. */
 export const ZONE_NAME = 'wingtheidea.com';
 export const HOSTED_ZONE_ID = 'Z008500039SSWYWL7HKJI';
