@@ -26,15 +26,23 @@ const data = new DataStack(app, 'reconflow-data', {
   description: 'ReconFlow core table, documents bucket, and the representative source databases seeded for the proof of concept',
 });
 
+// One-off: `cdk import` of a pool a rolled-back deploy left behind. An import
+// changeset on a new stack may not carry stack tags or a CloudFormation
+// execution role, so in this mode the stack is synthesised with neither; the
+// ordinary deploy that follows puts both back.
+const importOnly = process.env.RECONFLOW_IMPORT_ONLY === '1';
+
 const auth = new AuthStack(app, 'reconflow-auth', {
   env,
   stackName: `${PREFIX}-auth`,
+  synthesizer: importOnly ? new cdk.CliCredentialsStackSynthesizer() : undefined,
   description: 'ReconFlow sign-in: Cognito user pool with passwordless email one-time codes sent through SES',
   // The platform root: signs into the BMS and creates organisations, each
   // with an owner. Every other account is provisioned from there.
   initialUsers: [
     { email: 'riyad@mobil80.com', name: 'Riyad Rasheed', organisationId: 'wingtheidea', role: 'root' },
   ],
+  importOnly,
 });
 
 const PORTAL_DOMAIN = 'reconflow.wingtheidea.com';
@@ -93,10 +101,11 @@ const bms = new StaticSiteStack(app, 'reconflow-bms', {
 
 // The account is shared with four other products, so tags are how ReconFlow's
 // resources stay identifiable.
-for (const stack of [data, auth, certificates, portal, bms]) {
+const taggedStacks = importOnly ? [data, certificates, portal, bms] : [data, auth, certificates, portal, bms];
+for (const stack of taggedStacks) {
   cdk.Tags.of(stack).add('project', PREFIX);
 }
-for (const stack of [data, auth, certificates, portal, bms]) {
+for (const stack of taggedStacks) {
   cdk.Tags.of(stack).add('managed-by', 'cdk');
   cdk.Tags.of(stack).add('repo', 'Admin-Mobil80/RECONFLOW-BACKEND');
 }

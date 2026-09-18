@@ -1,5 +1,10 @@
+import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
 import { MAIL_FROM_ADDRESS, MAIL_FROM_NAME, PREFIX, SES_IDENTITY_DOMAIN, SES_REGION } from './account';
 
@@ -28,6 +33,13 @@ export interface AuthStackProps extends cdk.StackProps {
    * Everyone else is provisioned from the BMS. There is no self sign-up.
    */
   readonly initialUsers: readonly InitialUser[];
+  /**
+   * Synthesise only the user pool. Used once, to `cdk import` a pool that a
+   * rolled-back deploy left behind (it is RETAIN + deletion-protected): a
+   * CloudFormation import changeset may not create anything, so the clients
+   * and users have to follow in a normal deploy afterwards.
+   */
+  readonly importOnly?: boolean;
 }
 
 /**
@@ -41,28 +53,70 @@ export interface AuthStackProps extends cdk.StackProps {
  */
 export class AuthStack extends cdk.Stack {
   public readonly userPool: cognito.UserPool;
-  public readonly portalClient: cognito.UserPoolClient;
-  public readonly bmsClient: cognito.UserPoolClient;
+  /** Absent only in import-only mode. */
+  public readonly portalClient?: cognito.UserPoolClient;
+  public readonly bmsClient?: cognito.UserPoolClient;
 
   constructor(scope: Construct, id: string, props: AuthStackProps) {
     super(scope, id, props);
 
+    // Cognito's built-in email one-time code is eight digits and not
+    // configurable. The house standard is six, so sign-in runs Cognito's
+    // custom auth flow instead: these three triggers mint a six-digit code,
+    // email it as ReconFlow, and verify the answer. Same passwordless
+    // experience, our code length, our wording.
+    const trigger = (name: string, entry: string, environment?: Record<string, string>) =>
+      new NodejsFunction(this, name, {
+        functionName: `${PREFIX}-auth-${entry}`,
+        entry: path.join(__dirname, `../src/handlers/auth-${entry}.ts`),
+        runtime: lambda.Runtime.NODEJS_24_X,
+        timeout: cdk.Duration.seconds(10),
+        memorySize: 256,
+        logGroup: new logs.LogGroup(this, `${name}Logs`, {
+          retention: logs.RetentionDays.ONE_MONTH,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+        bundling: { target: 'node24', externalModules: ['@aws-sdk/*'] },
+        environment,
+      });
+
+    const defineAuthChallenge = trigger('DefineChallenge', 'define-challenge');
+    const createAuthChallenge = trigger('CreateChallenge', 'create-challenge', {
+      SES_REGION,
+      FROM_ADDRESS: MAIL_FROM_ADDRESS,
+      FROM_NAME: MAIL_FROM_NAME,
+      PRODUCT_NAME: MAIL_FROM_NAME,
+    });
+    const verifyAuthChallengeResponse = trigger('VerifyChallenge', 'verify-challenge');
+
+    // Send only as the configured address; the account has other identities.
+    createAuthChallenge.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ses:SendEmail'],
+        resources: [`arn:aws:ses:${SES_REGION}:${this.account}:identity/${SES_IDENTITY_DOMAIN}`],
+        conditions: { StringEquals: { 'ses:FromAddress': MAIL_FROM_ADDRESS } },
+      }),
+    );
+
     this.userPool = new cognito.UserPool(this, 'UserPool', {
       userPoolName: `${PREFIX}-users`,
-      // Passwordless sign-in needs the Essentials tier or above.
-      featurePlan: cognito.FeaturePlan.ESSENTIALS,
+      // Custom auth triggers work on the Lite tier; nothing here needs more.
+      featurePlan: cognito.FeaturePlan.LITE,
       selfSignUpEnabled: false,
       signInAliases: { email: true },
       signInCaseSensitive: false,
       autoVerify: { email: true },
-      // Cognito refuses to remove password as a first factor at the pool
-      // level, so passwordlessness is enforced everywhere below it instead:
-      // the client's only flow is USER_AUTH, the sign-in UI only ever asks for
-      // EMAIL_OTP, no user is ever issued a password (creation suppresses the
-      // temporary one), and account recovery is off so none can be set.
-      signInPolicy: {
-        allowedFirstAuthFactors: { password: true, emailOtp: true },
-      },
+      lambdaTriggers: { defineAuthChallenge, createAuthChallenge, verifyAuthChallengeResponse },
+      // Stated explicitly so an earlier EMAIL_OTP setting is cleared: Lite
+      // refuses a pool with passwordless sign-in still enabled. Password is
+      // the only factor Cognito lets a pool declare on its own, and no client
+      // here offers a password flow.
+      signInPolicy: { allowedFirstAuthFactors: { password: true } },
+      // Cognito cannot be told to have no passwords at the pool level, so
+      // passwordlessness is enforced everywhere below it: the clients' only
+      // sign-in flow is CUSTOM_AUTH, no user is ever issued a password
+      // (creation suppresses the temporary one), and account recovery is off
+      // so none can be set.
       standardAttributes: {
         email: { required: true, mutable: true },
         fullname: { required: false, mutable: true },
@@ -79,24 +133,27 @@ export class AuthStack extends cdk.Stack {
         sesRegion: SES_REGION,
         sesVerifiedDomain: SES_IDENTITY_DOMAIN,
       }),
-      userVerification: {
-        emailSubject: 'Your ReconFlow sign-in code',
-        emailBody: 'Your ReconFlow sign-in code is {####}. It expires shortly. If you did not request it, ignore this email.',
-        emailStyle: cognito.VerificationEmailStyle.CODE,
-      },
       // Nothing to recover: there are no passwords.
       accountRecovery: cognito.AccountRecovery.NONE,
       deletionProtection: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    new cdk.CfnOutput(this, 'UserPoolId', {
+      value: this.userPool.userPoolId,
+      description: 'Set as repo variable VITE_COGNITO_USER_POOL_ID in the frontends',
+    });
+    new cdk.CfnOutput(this, 'Region', { value: this.region });
+
+    if (props.importOnly) return;
+
     // One client per surface, identical in shape, so each can be rotated or
-    // restricted on its own. Both use USER_AUTH: the choice-based flow that
-    // carries EMAIL_OTP.
+    // restricted on its own. CUSTOM_AUTH is the only sign-in flow: it runs the
+    // triggers above. No SRP, no USER_PASSWORD_AUTH.
     const clientFor = (id: string, name: string) =>
       this.userPool.addClient(id, {
         userPoolClientName: `${PREFIX}-${name}`,
-        authFlows: { user: true },
+        authFlows: { custom: true },
         generateSecret: false,
         preventUserExistenceErrors: true,
         idTokenValidity: cdk.Duration.hours(8),
@@ -105,7 +162,8 @@ export class AuthStack extends cdk.Stack {
         readAttributes: new cognito.ClientAttributes()
           .withStandardAttributes({ email: true, emailVerified: true, fullname: true })
           .withCustomAttributes('org', 'role'),
-        writeAttributes: new cognito.ClientAttributes().withStandardAttributes({ fullname: true }),
+        // No writeAttributes: Cognito rejects a client that cannot write the
+        // pool's required attributes, and nobody self-registers here anyway.
       });
     this.portalClient = clientFor('PortalClient', 'portal');
     this.bmsClient = clientFor('BmsClient', 'bms');
@@ -127,10 +185,6 @@ export class AuthStack extends cdk.Stack {
       });
     }
 
-    new cdk.CfnOutput(this, 'UserPoolId', {
-      value: this.userPool.userPoolId,
-      description: 'Set as repo variable VITE_COGNITO_USER_POOL_ID in the frontends',
-    });
     new cdk.CfnOutput(this, 'PortalClientId', {
       value: this.portalClient.userPoolClientId,
       description: 'Set as repo variable VITE_COGNITO_CLIENT_ID in RECONFLOW-PORTAL',
@@ -139,6 +193,5 @@ export class AuthStack extends cdk.Stack {
       value: this.bmsClient.userPoolClientId,
       description: 'Set as repo variable VITE_COGNITO_CLIENT_ID in RECONFLOW-BMS',
     });
-    new cdk.CfnOutput(this, 'Region', { value: this.region });
   }
 }
