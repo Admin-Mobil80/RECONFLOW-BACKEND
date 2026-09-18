@@ -3,6 +3,8 @@ import * as cdk from 'aws-cdk-lib';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import type * as cognito from 'aws-cdk-lib/aws-cognito';
+import type * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -32,6 +34,17 @@ export interface StaticSiteStackProps extends cdk.StackProps {
   readonly certificate: acm.ICertificate;
   /** Present on the public site only: serves the Contact Us form at /api/contact. */
   readonly contactForm?: ContactFormProps;
+  /** Present on the BMS only: serves platform administration at /api/*. Mutually exclusive with contactForm. */
+  readonly adminApi?: AdminApiProps;
+}
+
+export interface AdminApiProps {
+  readonly coreTable: dynamodb.ITable;
+  /** Where organisation owners are created. */
+  readonly portalUserPool: cognito.IUserPool;
+  /** Whose tokens the API accepts. */
+  readonly bmsUserPool: cognito.IUserPool;
+  readonly bmsClientId: string;
 }
 
 export interface ContactFormProps {
@@ -110,6 +123,7 @@ export class StaticSiteStack extends cdk.Stack {
     });
 
     if (props.contactForm) this.addContactForm(distribution, props.contactForm);
+    if (props.adminApi) this.addAdminApi(distribution, props.adminApi);
 
     const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', {
       hostedZoneId: HOSTED_ZONE_ID,
@@ -254,6 +268,51 @@ export class StaticSiteStack extends cdk.Stack {
       cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
       // Forward the body and headers, but not Host: the function URL's own
       // hostname is what its TLS certificate expects.
+      originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+    });
+  }
+
+  /**
+   * Platform administration for the BMS, at /api/* on its distribution. The
+   * function verifies the caller's ID token against the BMS user pool and
+   * creates organisation owners in the portal's pool.
+   */
+  private addAdminApi(distribution: cloudfront.Distribution, config: AdminApiProps): void {
+    const fn = new NodejsFunction(this, 'AdminApiFunction', {
+      entry: path.join(__dirname, '../src/handlers/bms-api.ts'),
+      runtime: lambda.Runtime.NODEJS_24_X,
+      timeout: cdk.Duration.seconds(15),
+      memorySize: 256,
+      logGroup: new logs.LogGroup(this, 'AdminApiFunctionLogs', {
+        retention: logs.RetentionDays.ONE_MONTH,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+      // aws-jwt-verify is not in the runtime, so it is bundled; the SDK is.
+      bundling: { target: 'node24', externalModules: ['@aws-sdk/*'] },
+      environment: {
+        CORE_TABLE: config.coreTable.tableName,
+        PORTAL_USER_POOL_ID: config.portalUserPool.userPoolId,
+        BMS_USER_POOL_ID: config.bmsUserPool.userPoolId,
+        BMS_CLIENT_ID: config.bmsClientId,
+      },
+    });
+
+    config.coreTable.grantReadWriteData(fn);
+    // Create owners in the portal pool - and nothing in the BMS pool, which
+    // this function can only read tokens from.
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['cognito-idp:AdminCreateUser', 'cognito-idp:AdminGetUser'],
+        resources: [config.portalUserPool.userPoolArn],
+      }),
+    );
+
+    const url = fn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
+
+    distribution.addBehavior('/api/*', origins.FunctionUrlOrigin.withOriginAccessControl(url), {
+      viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+      cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
       originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
     });
   }

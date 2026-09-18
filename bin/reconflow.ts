@@ -95,6 +95,17 @@ const bms = new StaticSiteStack(app, 'reconflow-bms', {
   domainName: BMS_DOMAIN,
   sitePrefix: 'RECONFLOW/BMS',
   certificate: certificates.certificates[BMS_DOMAIN],
+  // Platform administration: organisations and their owners. Absent only in
+  // the auth stack's import-only mode, when the BMS pool is not synthesised.
+  adminApi:
+    auth.bmsUserPool && auth.bmsClient
+      ? {
+          coreTable: data.coreTable,
+          portalUserPool: auth.portalUserPool,
+          bmsUserPool: auth.bmsUserPool,
+          bmsClientId: auth.bmsClient.userPoolClientId,
+        }
+      : undefined,
 });
 
 // The account is shared with four other products, so tags are how ReconFlow's

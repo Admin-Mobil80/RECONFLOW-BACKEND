@@ -15,7 +15,7 @@ import { ADB_ORGANISATION_ID, ADB_SOURCES, type AdbSourceId } from "../src/tenan
  * a new scenario, a changed amount — is invisible to CloudFormation without
  * this, because the custom resource only re-runs when its properties change.
  */
-const SEED_VERSION = "2026-09-18.1";
+const SEED_VERSION = "2026-09-18.2";
 
 /**
  * ReconFlow's own data plus the representative source databases for the

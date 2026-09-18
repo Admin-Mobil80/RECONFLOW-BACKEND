@@ -95,7 +95,9 @@ export async function handler(event: CdkCustomResourceEvent): Promise<CdkCustomR
     );
   }
 
-  // The organisation's own profile lives in the core table.
+  // The organisation's own profile lives in the core table, plus the listing
+  // item the BMS reads (one Query under ORGANISATIONS lists every organisation).
+  const seededAt = new Date().toISOString();
   await dynamo.send(
     new PutCommand({
       TableName: props.CoreTable,
@@ -104,7 +106,21 @@ export async function handler(event: CdkCustomResourceEvent): Promise<CdkCustomR
         SK: "PROFILE",
         ...ADB_ORGANISATION,
         seedVersion: props.SeedVersion,
-        seededAt: new Date().toISOString(),
+        seededAt,
+      },
+    }),
+  );
+  await dynamo.send(
+    new PutCommand({
+      TableName: props.CoreTable,
+      Item: {
+        PK: "ORGANISATIONS",
+        SK: `ORG#${ADB_ORGANISATION.organisationId}`,
+        organisationId: ADB_ORGANISATION.organisationId,
+        name: ADB_ORGANISATION.name,
+        baseCurrency: ADB_ORGANISATION.baseCurrency,
+        ownerEmail: "(seeded - owner not yet created)",
+        createdAt: seededAt,
       },
     }),
   );
