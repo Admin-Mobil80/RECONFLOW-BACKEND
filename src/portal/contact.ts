@@ -1,13 +1,9 @@
 /**
  * Contact Us on the public site: validates the form and emails the enquiry.
- *
- * Reached through CloudFront at /api/contact on the site's own hostname, so
- * the browser posts same-origin — no CORS, no API hostname baked into the
- * build. The function URL itself requires an IAM-signed request; only the
- * distribution's Origin Access Control can produce one.
+ * Public - no sign-in - and served by the portal API at POST /api/contact.
  *
  * Sends through SES in SES_REGION, which is where the wingtheidea.com identity
- * is verified and not necessarily where this function runs.
+ * is verified and not necessarily where the function runs.
  */
 
 import { SESv2Client, SendEmailCommand } from "@aws-sdk/client-sesv2";
@@ -25,12 +21,21 @@ const MIN_USE_CASE = 20;
 // Permissive on purpose: the only real proof an address works is delivery.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function json(statusCode: number, body: unknown): LambdaFunctionURLResult {
+export function json(statusCode: number, body: unknown): LambdaFunctionURLResult {
   return {
     statusCode,
     headers: { "content-type": "application/json", "cache-control": "no-store" },
     body: JSON.stringify(body),
   };
+}
+
+export function parseBody(event: LambdaFunctionURLEvent): Record<string, unknown> | undefined {
+  try {
+    const raw = event.isBase64Encoded ? Buffer.from(event.body ?? "", "base64").toString("utf8") : (event.body ?? "");
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
 }
 
 interface Submission {
@@ -63,18 +68,12 @@ function validate(data: Record<string, unknown>): { submission?: Submission; err
   return errors.length ? { errors } : { submission: { name, email, phone, useCase }, errors };
 }
 
-export async function handler(event: LambdaFunctionURLEvent): Promise<LambdaFunctionURLResult> {
+export async function handleContact(event: LambdaFunctionURLEvent): Promise<LambdaFunctionURLResult> {
   if (event.requestContext.http.method !== "POST") {
     return json(405, { ok: false, errors: ["Method not allowed."] });
   }
-
-  let data: Record<string, unknown>;
-  try {
-    const raw = event.isBase64Encoded ? Buffer.from(event.body ?? "", "base64").toString("utf8") : (event.body ?? "");
-    data = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    return json(400, { ok: false, errors: ["Malformed request."] });
-  }
+  const data = parseBody(event);
+  if (!data) return json(400, { ok: false, errors: ["Malformed request."] });
 
   // Honeypot: a person never fills a field they cannot see. Report success so
   // a bot learns nothing about why nothing happened.
@@ -83,14 +82,13 @@ export async function handler(event: LambdaFunctionURLEvent): Promise<LambdaFunc
   const { submission, errors } = validate(data);
   if (!submission) return json(400, { ok: false, errors });
 
-  const received = new Date().toISOString();
   const lines = [
     `New ${PRODUCT} enquiry`,
     "",
     `Name:   ${submission.name}`,
     `Email:  ${submission.email}`,
     `Phone:  ${submission.phone || "(not given)"}`,
-    `Sent:   ${received}`,
+    `Sent:   ${new Date().toISOString()}`,
     "",
     "Use case:",
     submission.useCase,

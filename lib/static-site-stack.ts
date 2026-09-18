@@ -6,6 +6,7 @@ import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import type * as cognito from 'aws-cdk-lib/aws-cognito';
 import type * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import type * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -32,10 +33,22 @@ export interface StaticSiteStackProps extends cdk.StackProps {
   readonly sitePrefix: string;
   /** Certificate for `domainName`, from the us-east-1 certificates stack. */
   readonly certificate: acm.ICertificate;
-  /** Present on the public site only: serves the Contact Us form at /api/contact. */
-  readonly contactForm?: ContactFormProps;
-  /** Present on the BMS only: serves platform administration at /api/*. Mutually exclusive with contactForm. */
+  /** Present on the portal only: the portal API at /api/*, including the public Contact Us form. */
+  readonly portalApi?: PortalApiProps;
+  /** Present on the BMS only: serves platform administration at /api/*. Mutually exclusive with portalApi. */
   readonly adminApi?: AdminApiProps;
+}
+
+export interface PortalApiProps {
+  readonly contact: ContactFormProps;
+  readonly coreTable: dynamodb.ITable;
+  readonly documentsBucket: s3.IBucket;
+  /** sourceId -> table, read-only for the API. */
+  readonly sourceTables: Readonly<Record<string, dynamodb.ITable>>;
+  /** Whose tokens the API accepts. */
+  readonly portalUserPool: cognito.IUserPool;
+  readonly portalClientId: string;
+  readonly openAiSecret: secretsmanager.ISecret;
 }
 
 export interface AdminApiProps {
@@ -122,7 +135,7 @@ export class StaticSiteStack extends cdk.Stack {
       ],
     });
 
-    if (props.contactForm) this.addContactForm(distribution, props.contactForm);
+    if (props.portalApi) this.addPortalApi(distribution, props.portalApi);
     if (props.adminApi) this.addAdminApi(distribution, props.adminApi);
 
     const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', {
@@ -226,27 +239,44 @@ export class StaticSiteStack extends cdk.Stack {
   }
 
   /**
-   * Contact Us handler, served from this distribution at /api/* so the form
-   * posts same-origin. The function URL requires IAM auth; only CloudFront's
-   * Origin Access Control can sign for it, so the URL is useless on its own.
+   * The portal API, served from this distribution at /api/* so the browser
+   * calls same-origin: the public Contact Us form, and the signed-in case
+   * screens. The function URL requires IAM auth; only CloudFront's Origin
+   * Access Control can sign for it, so the URL is useless on its own.
+   *
+   * Reads the source tables and the documents bucket; writes only decisions
+   * into the core table. Nothing here can touch a source system.
    */
-  private addContactForm(distribution: cloudfront.Distribution, config: ContactFormProps): void {
+  private addPortalApi(distribution: cloudfront.Distribution, config: PortalApiProps): void {
+    const sourceTables: Record<string, string> = {};
+    for (const [sourceId, table] of Object.entries(config.sourceTables)) sourceTables[sourceId] = table.tableName;
+
+    // Construct id 'ContactFunction' is kept so the deployed function is
+    // updated in place rather than replaced.
     const fn = new NodejsFunction(this, 'ContactFunction', {
-      entry: path.join(__dirname, '../src/handlers/contact-form.ts'),
+      entry: path.join(__dirname, '../src/handlers/portal-api.ts'),
       runtime: lambda.Runtime.NODEJS_24_X,
-      timeout: cdk.Duration.seconds(10),
-      memorySize: 256,
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 512,
       logGroup: new logs.LogGroup(this, 'ContactFunctionLogs', {
         retention: logs.RetentionDays.ONE_MONTH,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       }),
+      // aws-jwt-verify is bundled; the SDK ships with the runtime.
       bundling: { target: 'node24', externalModules: ['@aws-sdk/*'] },
       environment: {
-        SES_REGION: config.sesRegion,
-        FROM_ADDRESS: config.fromAddress,
-        FROM_NAME: config.fromName,
-        TO_ADDRESS: config.toAddress,
-        PRODUCT_NAME: config.fromName,
+        SES_REGION: config.contact.sesRegion,
+        FROM_ADDRESS: config.contact.fromAddress,
+        FROM_NAME: config.contact.fromName,
+        TO_ADDRESS: config.contact.toAddress,
+        PRODUCT_NAME: config.contact.fromName,
+        CORE_TABLE: config.coreTable.tableName,
+        DOCUMENTS_BUCKET: config.documentsBucket.bucketName,
+        SOURCE_TABLES: JSON.stringify(sourceTables),
+        PORTAL_USER_POOL_ID: config.portalUserPool.userPoolId,
+        PORTAL_CLIENT_ID: config.portalClientId,
+        OPENAI_SECRET_ARN: config.openAiSecret.secretArn,
+        OPENAI_MODEL: 'gpt-4o-mini',
       },
     });
 
@@ -255,10 +285,14 @@ export class StaticSiteStack extends cdk.Stack {
     fn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['ses:SendEmail'],
-        resources: [`arn:aws:ses:${config.sesRegion}:${this.account}:identity/${config.sesIdentityDomain}`],
-        conditions: { StringEquals: { 'ses:FromAddress': config.fromAddress } },
+        resources: [`arn:aws:ses:${config.contact.sesRegion}:${this.account}:identity/${config.contact.sesIdentityDomain}`],
+        conditions: { StringEquals: { 'ses:FromAddress': config.contact.fromAddress } },
       }),
     );
+    config.coreTable.grantReadWriteData(fn);
+    for (const table of Object.values(config.sourceTables)) table.grantReadData(fn);
+    config.documentsBucket.grantRead(fn);
+    config.openAiSecret.grantRead(fn);
 
     const url = fn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
 

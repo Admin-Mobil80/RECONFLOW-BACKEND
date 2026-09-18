@@ -6,6 +6,7 @@ import * as lambda from "aws-cdk-lib/aws-lambda";
 import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import { Construct } from "constructs";
 import { PREFIX } from "./account";
 import { ADB_ORGANISATION_ID, ADB_SOURCES, type AdbSourceId } from "../src/tenants/adb/records";
@@ -30,9 +31,23 @@ export class DataStack extends cdk.Stack {
   public readonly coreTable: dynamodb.Table;
   public readonly sourceTables: Record<AdbSourceId, dynamodb.Table>;
   public readonly documentsBucket: s3.Bucket;
+  /**
+   * Holds the OpenAI platform key. Created with a placeholder - the real value
+   * is never in this repo or a template. Set it once with:
+   *   aws secretsmanager put-secret-value --secret-id reconflow/openai-api-key \
+   *     --secret-string 'sk-...' --profile wingtheidea --region ap-south-1
+   * Until then the narrator falls back to a deterministic summary.
+   */
+  public readonly openAiSecret: secretsmanager.Secret;
 
   constructor(scope: Construct, id: string, props: cdk.StackProps) {
     super(scope, id, props);
+
+    this.openAiSecret = new secretsmanager.Secret(this, "OpenAiApiKey", {
+      secretName: `${PREFIX}/openai-api-key`,
+      description: "OpenAI platform key used by ReconFlow to narrate case summaries. Placeholder until set.",
+      generateSecretString: { passwordLength: 16, excludePunctuation: true },
+    });
 
     this.coreTable = new dynamodb.Table(this, "CoreTable", {
       tableName: `${PREFIX}-core`,

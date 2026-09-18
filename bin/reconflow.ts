@@ -75,14 +75,25 @@ const portal = new StaticSiteStack(app, 'reconflow-portal', {
   domainName: PORTAL_DOMAIN,
   sitePrefix: 'RECONFLOW/PORTAL',
   certificate: certificates.certificates[PORTAL_DOMAIN],
-  // The public site carries the Contact Us form; the BMS is internal and does not.
-  contactForm: {
-    toAddress: ENQUIRIES_TO_ADDRESS,
-    fromAddress: MAIL_FROM_ADDRESS,
-    fromName: MAIL_FROM_NAME,
-    sesRegion: SES_REGION,
-    sesIdentityDomain: SES_IDENTITY_DOMAIN,
-  },
+  // The portal API: the public Contact Us form plus the signed-in case
+  // screens. Absent only in the auth stack's import-only mode.
+  portalApi: auth.portalClient
+    ? {
+        contact: {
+          toAddress: ENQUIRIES_TO_ADDRESS,
+          fromAddress: MAIL_FROM_ADDRESS,
+          fromName: MAIL_FROM_NAME,
+          sesRegion: SES_REGION,
+          sesIdentityDomain: SES_IDENTITY_DOMAIN,
+        },
+        coreTable: data.coreTable,
+        documentsBucket: data.documentsBucket,
+        sourceTables: data.sourceTables,
+        portalUserPool: auth.portalUserPool,
+        portalClientId: auth.portalClient.userPoolClientId,
+        openAiSecret: data.openAiSecret,
+      }
+    : undefined,
 });
 
 const bms = new StaticSiteStack(app, 'reconflow-bms', {

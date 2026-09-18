@@ -194,21 +194,21 @@ export interface CaseTypeModule {
   ): string[];
 }
 
-/** Runs a case type end to end over one anchor record. */
-export async function assess(
+/** Runs a case type end to end over one anchor record, keeping the evidence it gathered. */
+export async function assessWithEvidence(
   module: CaseTypeModule,
   anchor: SourceRecord,
   reader: SourceReader,
   fx: FxRateSource,
   baseCurrency: CurrencyCode,
   now: Date = new Date(),
-): Promise<Assessment> {
+): Promise<{ assessment: Assessment; evidence: EvidencePackage }> {
   const evidence = await module.gather(anchor, reader, fx, baseCurrency, now);
   const readiness = module.assessReadiness(evidence);
   const classification = module.classify(evidence, readiness);
   const exceptions = module.detectExceptions(evidence, readiness, classification, now);
   const lifecycle = module.lifecycle(evidence, readiness, exceptions, now);
-  return {
+  const assessment: Assessment = {
     organisationId: evidence.organisationId,
     caseTypeId: module.id,
     caseId: evidence.caseId,
@@ -220,4 +220,17 @@ export async function assess(
     summaryFacts: module.summaryFacts(evidence, readiness, classification, exceptions),
     fx: evidence.fx,
   };
+  return { assessment, evidence };
+}
+
+/** Runs a case type end to end over one anchor record. */
+export async function assess(
+  module: CaseTypeModule,
+  anchor: SourceRecord,
+  reader: SourceReader,
+  fx: FxRateSource,
+  baseCurrency: CurrencyCode,
+  now: Date = new Date(),
+): Promise<Assessment> {
+  return (await assessWithEvidence(module, anchor, reader, fx, baseCurrency, now)).assessment;
 }
