@@ -15,7 +15,7 @@ import { ADB_ORGANISATION_ID, ADB_SOURCES, type AdbSourceId } from "../src/tenan
  * a new scenario, a changed amount — is invisible to CloudFormation without
  * this, because the custom resource only re-runs when its properties change.
  */
-const SEED_VERSION = "2026-09-18.2";
+const SEED_VERSION = "2026-09-18.3";
 
 /**
  * ReconFlow's own data plus the representative source databases for the
@@ -84,7 +84,9 @@ export class DataStack extends cdk.Stack {
       },
     });
 
-    this.coreTable.grantWriteData(seedFunction);
+    // Read as well as write: the seed checks for, and removes, organisation
+    // items that earlier versions wrote.
+    this.coreTable.grantReadWriteData(seedFunction);
     for (const table of Object.values(sourceTables)) table.grantWriteData(seedFunction);
     this.documentsBucket.grantPut(seedFunction);
 

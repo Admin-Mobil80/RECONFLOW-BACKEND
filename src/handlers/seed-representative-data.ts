@@ -10,7 +10,7 @@
  */
 
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { BatchWriteCommand, DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { BatchWriteCommand, DeleteCommand, DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import type { CdkCustomResourceEvent, CdkCustomResourceResponse } from "aws-lambda";
 import { itemsForDocument, itemsForRecord, type KeyedItem } from "../domain/dynamo-keys";
@@ -95,35 +95,23 @@ export async function handler(event: CdkCustomResourceEvent): Promise<CdkCustomR
     );
   }
 
-  // The organisation's own profile lives in the core table, plus the listing
-  // item the BMS reads (one Query under ORGANISATIONS lists every organisation).
-  const seededAt = new Date().toISOString();
-  await dynamo.send(
-    new PutCommand({
-      TableName: props.CoreTable,
-      Item: {
-        PK: `ORG#${ADB_ORGANISATION.organisationId}`,
-        SK: "PROFILE",
-        ...ADB_ORGANISATION,
-        seedVersion: props.SeedVersion,
-        seededAt,
-      },
-    }),
+  // Organisations are never seeded: Riyad creates them explicitly from the
+  // BMS, and the source data above lines up with the one he creates as
+  // `adb`. Earlier seed versions did write a profile and listing item for it;
+  // remove those if they are still there, so the BMS starts empty.
+  const orgKey = `ORG#${ADB_ORGANISATION.organisationId}`;
+  const legacyProfile = await dynamo.send(
+    new GetCommand({ TableName: props.CoreTable, Key: { PK: orgKey, SK: "PROFILE" } }),
   );
-  await dynamo.send(
-    new PutCommand({
-      TableName: props.CoreTable,
-      Item: {
-        PK: "ORGANISATIONS",
-        SK: `ORG#${ADB_ORGANISATION.organisationId}`,
-        organisationId: ADB_ORGANISATION.organisationId,
-        name: ADB_ORGANISATION.name,
-        baseCurrency: ADB_ORGANISATION.baseCurrency,
-        ownerEmail: "(seeded - owner not yet created)",
-        createdAt: seededAt,
-      },
-    }),
+  if (legacyProfile.Item?.seedVersion) {
+    await dynamo.send(new DeleteCommand({ TableName: props.CoreTable, Key: { PK: orgKey, SK: "PROFILE" } }));
+  }
+  const legacyListing = await dynamo.send(
+    new GetCommand({ TableName: props.CoreTable, Key: { PK: "ORGANISATIONS", SK: orgKey } }),
   );
+  if (String(legacyListing.Item?.ownerEmail ?? "").startsWith("(seeded")) {
+    await dynamo.send(new DeleteCommand({ TableName: props.CoreTable, Key: { PK: "ORGANISATIONS", SK: orgKey } }));
+  }
 
   const recordCount = [...bySource.values()].reduce((sum, items) => sum + items.length, 0);
   return {

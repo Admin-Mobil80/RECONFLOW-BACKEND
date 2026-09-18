@@ -12,7 +12,7 @@
 
 import { AdminCreateUserCommand, CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import type { LambdaFunctionURLEvent, LambdaFunctionURLResult } from "aws-lambda";
 import { isKnownCurrency } from "../domain/currencies";
@@ -119,30 +119,22 @@ async function createOrganisation(body: Record<string, unknown>): Promise<Organi
     createdAt,
   };
 
-  // The profile is the source of truth. An organisation that already has an
-  // owner is never overwritten; one that exists without an owner - the
-  // representative tenant is seeded that way - is completed by this call.
-  const existing = await dynamo.send(
-    new GetCommand({ TableName: CORE_TABLE, Key: { PK: `ORG#${organisationId}`, SK: "PROFILE" } }),
-  );
-  const existingOwner = existing.Item?.ownerEmail as string | undefined;
-  if (existingOwner && !existingOwner.startsWith("(seeded")) {
-    throw new HttpError(409, `An organisation with identifier "${organisationId}" already exists.`);
+  // The profile is the source of truth and refuses to overwrite an existing
+  // organisation; the listing item is written only once that succeeds.
+  try {
+    await dynamo.send(
+      new PutCommand({
+        TableName: CORE_TABLE,
+        Item: { PK: `ORG#${organisationId}`, SK: "PROFILE", ...profile },
+        ConditionExpression: "attribute_not_exists(PK)",
+      }),
+    );
+  } catch (error) {
+    if ((error as { name?: string }).name === "ConditionalCheckFailedException") {
+      throw new HttpError(409, `An organisation with identifier "${organisationId}" already exists.`);
+    }
+    throw error;
   }
-  await dynamo.send(
-    new PutCommand({
-      TableName: CORE_TABLE,
-      Item: {
-        PK: `ORG#${organisationId}`,
-        SK: "PROFILE",
-        ...(existing.Item ?? {}),
-        ...profile,
-        // Keep what the seed configured; only the owner and names are new.
-        interfaces: existing.Item?.interfaces ?? profile.interfaces,
-        createdAt: (existing.Item?.createdAt as string | undefined) ?? createdAt,
-      },
-    }),
-  );
   await dynamo.send(
     new PutCommand({
       TableName: CORE_TABLE,
