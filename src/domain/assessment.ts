@@ -194,6 +194,26 @@ export interface CaseTypeModule {
   ): string[];
 }
 
+/** Readiness with the rule that a blocking exception means not ready, whatever else passed. */
+export function withBlockingExceptions(
+  readiness: ReadinessAssessment,
+  exceptions: readonly CaseException[],
+): ReadinessAssessment {
+  const blocking = exceptions.filter((e) => e.severity === "blocking");
+  const check: ReadinessCheck = {
+    id: "no-blocking-exceptions",
+    label: "No blocking exceptions",
+    passed: blocking.length === 0,
+    detail:
+      blocking.length === 0
+        ? "Nothing blocks processing."
+        : `Blocked by: ${blocking.map((e) => e.title.toLowerCase()).join("; ")}.`,
+    evidence: blocking.flatMap((e) => e.evidence),
+  };
+  const checks = [...readiness.checks, check];
+  return { verdict: checks.every((c) => c.passed) ? "ready" : "not-ready", checks };
+}
+
 /** Runs a case type end to end over one anchor record, keeping the evidence it gathered. */
 export async function assessWithEvidence(
   module: CaseTypeModule,
@@ -204,9 +224,13 @@ export async function assessWithEvidence(
   now: Date = new Date(),
 ): Promise<{ assessment: Assessment; evidence: EvidencePackage }> {
   const evidence = await module.gather(anchor, reader, fx, baseCurrency, now);
-  const readiness = module.assessReadiness(evidence);
-  const classification = module.classify(evidence, readiness);
-  const exceptions = module.detectExceptions(evidence, readiness, classification, now);
+  const initialReadiness = module.assessReadiness(evidence);
+  const classification = module.classify(evidence, initialReadiness);
+  const exceptions = module.detectExceptions(evidence, initialReadiness, classification, now);
+  // A blocking exception makes a case not ready whatever the case type's own
+  // criteria say, and shows up as a failed check so the reason is on the
+  // readiness list itself rather than only in the exceptions.
+  const readiness = withBlockingExceptions(initialReadiness, exceptions);
   const lifecycle = module.lifecycle(evidence, readiness, exceptions, now);
   const assessment: Assessment = {
     organisationId: evidence.organisationId,
