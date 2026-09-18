@@ -10,7 +10,8 @@
     "diff": "cdk diff",
     "deploy": "cdk deploy",
     "test": "tsc --noEmit",
-    "seed:preview": "ts-node src/tenants/adb/preview.ts"
+    "seed:preview": "ts-node src/tenants/adb/preview.ts",
+    "assess:preview": "ts-node src/tenants/adb/assess-preview.ts"
   },
   "dependencies": {
     "aws-cdk-lib": "^2",
