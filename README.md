@@ -48,7 +48,7 @@ Actions OIDC provider exists — created by another product, so this app
 | `reconflow-data` | ap-south-1 | ReconFlow's core table and documents bucket (retained), plus the five representative source tables for the proof of concept, seeded by a CloudFormation custom resource |
 | `reconflow-auth` | ap-south-1 | Two Cognito user pools, passwordless: the portal's holds organisation accounts, the BMS's holds the platform root only, so who may sign in where is enforced by membership. Both run the same three Lambda triggers (six-digit code emailed as ReconFlow via SES, verified in constant time, three attempts) |
 | `reconflow-certificates` | us-east-1 | ACM certificates for the ReconFlow hostnames (CloudFront accepts certificates only from us-east-1) |
-| `reconflow-portal` | ap-south-1 | CloudFront + Route 53 for `reconflow.wingtheidea.com`, and RECONFLOW-PORTAL's deploy role |
+| `reconflow-portal` | ap-south-1 | CloudFront + Route 53 for `reconflow.wingtheidea.com`, RECONFLOW-PORTAL's deploy role, and the portal API at `/api/*` — the public Contact Us form plus, for signed-in organisation users, cases assessed on request, case packages with signed document links, and decisions (the only writes) |
 | `reconflow-bms` | ap-south-1 | CloudFront + Route 53 for `bms.reconflow.wingtheidea.com`, RECONFLOW-BMS's deploy role, and the BMS API at `/api/*` (list/create organisations; creates each owner in the portal's pool) |
 
 ### Hosting layout
@@ -163,12 +163,27 @@ loaded without touching AWS. The first tenant's seed
 (`src/tenants/adb/seed.ts`) is ten refund cases covering the demonstration
 sequence and every exception in the requirement.
 
-## Application services — not built yet
+## The OpenAI key
 
-ReconFlow's backend will be serverless, built from these services (each one a
+The portal API narrates each case summary with the OpenAI platform. The key
+lives in the Secrets Manager secret `reconflow/openai-api-key`, which the
+data stack creates with a placeholder — the real value is never in this
+repo, a template or an environment file. Set it once:
+
+```bash
+aws secretsmanager put-secret-value --secret-id reconflow/openai-api-key \
+  --secret-string 'sk-...' --profile wingtheidea --region ap-south-1
+```
+
+Until it is set, the narrator falls back to a deterministic summary built
+from the same facts, so nothing depends on the model being available. The
+model is `OPENAI_MODEL` on the function (default `gpt-4o-mini`).
+
+## Application services
+
+ReconFlow's backend is serverless, built from these services (each one a
 CloudFormation resource in this app, like everything else). The LLM is the
-OpenAI platform, with the key held in Secrets Manager — never in this repo, a
-template or an environment file.
+OpenAI platform, with the key held in Secrets Manager as above.
 
 - **Lambda** on the `nodejs24.x` runtime
 - **AppSync** as the primary API
