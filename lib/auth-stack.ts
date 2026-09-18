@@ -155,7 +155,10 @@ export class AuthStack extends cdk.Stack {
         userPoolClientName: `${PREFIX}-${name}`,
         authFlows: { custom: true },
         generateSecret: false,
-        preventUserExistenceErrors: true,
+        // Off on purpose: an unknown address fails at once with "user does
+        // not exist" rather than pretending to send a code. Riyad's explicit
+        // preference - a clear message over hiding whether an account exists.
+        preventUserExistenceErrors: false,
         idTokenValidity: cdk.Duration.hours(8),
         accessTokenValidity: cdk.Duration.hours(1),
         refreshTokenValidity: cdk.Duration.days(30),
