@@ -49,7 +49,7 @@ Actions OIDC provider exists — created by another product, so this app
 | `reconflow-auth` | ap-south-1 | Two Cognito user pools, passwordless: the portal's holds organisation accounts, the BMS's holds the platform root only, so who may sign in where is enforced by membership. Both run the same three Lambda triggers (six-digit code emailed as ReconFlow via SES, verified in constant time, three attempts) |
 | `reconflow-certificates` | us-east-1 | ACM certificates for the ReconFlow hostnames (CloudFront accepts certificates only from us-east-1) |
 | `reconflow-portal` | ap-south-1 | CloudFront + Route 53 for `reconflow.wingtheidea.com`, and RECONFLOW-PORTAL's deploy role |
-| `reconflow-bms` | ap-south-1 | CloudFront + Route 53 for `bms.reconflow.wingtheidea.com`, and RECONFLOW-BMS's deploy role |
+| `reconflow-bms` | ap-south-1 | CloudFront + Route 53 for `bms.reconflow.wingtheidea.com`, RECONFLOW-BMS's deploy role, and the BMS API at `/api/*` (list/create organisations; creates each owner in the portal's pool) |
 
 ### Hosting layout
 
