@@ -15,46 +15,42 @@ import { MAIL_FROM_ADDRESS, MAIL_FROM_NAME, PREFIX, SES_IDENTITY_DOMAIN, SES_REG
  *   owner          an organisation's first account, created from the BMS
  *   administrator  manages the organisation's interfaces and users in the portal
  *   reviewer       decides cases
- *
- * A root user's organisationId is the platform's own id, not a customer's.
  */
 export type UserRole = 'root' | 'owner' | 'administrator' | 'reviewer';
 
-export interface InitialUser {
-  readonly email: string;
-  readonly name: string;
-  readonly organisationId: string;
-  readonly role: UserRole;
-}
-
 export interface AuthStackProps extends cdk.StackProps {
+  /** The single account that exists in the BMS pool from the first deploy. */
+  readonly bmsRoot: { readonly email: string; readonly name: string };
   /**
-   * Users that exist from the first deploy, as CloudFormation resources.
-   * Everyone else is provisioned from the BMS. There is no self sign-up.
-   */
-  readonly initialUsers: readonly InitialUser[];
-  /**
-   * Synthesise only the user pool. Used once, to `cdk import` a pool that a
-   * rolled-back deploy left behind (it is RETAIN + deletion-protected): a
-   * CloudFormation import changeset may not create anything, so the clients
-   * and users have to follow in a normal deploy afterwards.
+   * Synthesise only the portal user pool. Used once, to `cdk import` a pool
+   * that a rolled-back deploy left behind (it is RETAIN + deletion-protected):
+   * a CloudFormation import changeset may not create anything, so the rest
+   * has to follow in a normal deploy afterwards.
    */
   readonly importOnly?: boolean;
 }
 
 /**
- * Sign-in for every ReconFlow surface: passwordless, email + one-time code.
+ * Sign-in for every ReconFlow surface: passwordless, email + six-digit code.
  *
- * No password is ever set or accepted — `allowedFirstAuthFactors.password`
- * is off, so the only way in is the code Cognito emails through SES as
- * "ReconFlow <no-reply@wingtheidea.com>". Which organisation a user belongs
- * to, and whether they administer it, travel as custom attributes in the
- * ID token; the portal reads them from there and never asks a backend.
+ * Two user pools, not one. The portal's holds organisation accounts; the
+ * BMS's holds the platform root and nobody else. Which surface an account may
+ * sign into is therefore enforced by pool membership — a bug in role handling
+ * cannot turn a customer's account into one the BMS recognises, and the
+ * platform root cannot sign into a customer's portal. Both pools run the same
+ * custom auth triggers.
+ *
+ * No password is ever set or accepted. Cognito cannot be told to have no
+ * passwords at the pool level, so passwordlessness is enforced beneath it:
+ * every client's only sign-in flow is CUSTOM_AUTH, no user is issued a
+ * password (creation suppresses the temporary one), and account recovery is
+ * off so none can be set. Self sign-up is disabled everywhere.
  */
 export class AuthStack extends cdk.Stack {
-  public readonly userPool: cognito.UserPool;
+  public readonly portalUserPool: cognito.UserPool;
   /** Absent only in import-only mode. */
   public readonly portalClient?: cognito.UserPoolClient;
+  public readonly bmsUserPool?: cognito.UserPool;
   public readonly bmsClient?: cognito.UserPoolClient;
 
   constructor(scope: Construct, id: string, props: AuthStackProps) {
@@ -62,9 +58,9 @@ export class AuthStack extends cdk.Stack {
 
     // Cognito's built-in email one-time code is eight digits and not
     // configurable. The house standard is six, so sign-in runs Cognito's
-    // custom auth flow instead: these three triggers mint a six-digit code,
-    // email it as ReconFlow, and verify the answer. Same passwordless
-    // experience, our code length, our wording.
+    // custom auth flow: these three triggers mint a six-digit code, email it
+    // as ReconFlow, and verify the answer. They are pool-agnostic and serve
+    // both pools.
     const trigger = (name: string, entry: string, environment?: Record<string, string>) =>
       new NodejsFunction(this, name, {
         functionName: `${PREFIX}-auth-${entry}`,
@@ -98,8 +94,7 @@ export class AuthStack extends cdk.Stack {
       }),
     );
 
-    this.userPool = new cognito.UserPool(this, 'UserPool', {
-      userPoolName: `${PREFIX}-users`,
+    const poolDefaults: Omit<cognito.UserPoolProps, 'userPoolName'> = {
       // Custom auth triggers work on the Lite tier; nothing here needs more.
       featurePlan: cognito.FeaturePlan.LITE,
       selfSignUpEnabled: false,
@@ -112,11 +107,6 @@ export class AuthStack extends cdk.Stack {
       // the only factor Cognito lets a pool declare on its own, and no client
       // here offers a password flow.
       signInPolicy: { allowedFirstAuthFactors: { password: true } },
-      // Cognito cannot be told to have no passwords at the pool level, so
-      // passwordlessness is enforced everywhere below it: the clients' only
-      // sign-in flow is CUSTOM_AUTH, no user is ever issued a password
-      // (creation suppresses the temporary one), and account recovery is off
-      // so none can be set.
       standardAttributes: {
         email: { required: true, mutable: true },
         fullname: { required: false, mutable: true },
@@ -137,21 +127,31 @@ export class AuthStack extends cdk.Stack {
       accountRecovery: cognito.AccountRecovery.NONE,
       deletionProtection: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+    };
+
+    // Construct id 'UserPool' is load-bearing: it is the logical id of the
+    // pool that was imported, and the portal bundle carries its client id.
+    this.portalUserPool = new cognito.UserPool(this, 'UserPool', {
+      userPoolName: `${PREFIX}-users`,
+      ...poolDefaults,
     });
 
-    new cdk.CfnOutput(this, 'UserPoolId', {
-      value: this.userPool.userPoolId,
-      description: 'Set as repo variable VITE_COGNITO_USER_POOL_ID in the frontends',
+    new cdk.CfnOutput(this, 'PortalUserPoolId', {
+      value: this.portalUserPool.userPoolId,
+      description: 'Organisation accounts. Default in the portal; VITE_COGNITO_USER_POOL_ID overrides',
     });
-    new cdk.CfnOutput(this, 'Region', { value: this.region });
 
     if (props.importOnly) return;
 
-    // One client per surface, identical in shape, so each can be rotated or
-    // restricted on its own. CUSTOM_AUTH is the only sign-in flow: it runs the
-    // triggers above. No SRP, no USER_PASSWORD_AUTH.
-    const clientFor = (id: string, name: string) =>
-      this.userPool.addClient(id, {
+    this.bmsUserPool = new cognito.UserPool(this, 'BmsUserPool', {
+      userPoolName: `${PREFIX}-bms-users`,
+      ...poolDefaults,
+    });
+
+    // One client per surface, in that surface's pool. CUSTOM_AUTH is the only
+    // sign-in flow: it runs the triggers above. No SRP, no USER_PASSWORD_AUTH.
+    const clientFor = (pool: cognito.UserPool, id: string, name: string) =>
+      pool.addClient(id, {
         userPoolClientName: `${PREFIX}-${name}`,
         authFlows: { custom: true },
         generateSecret: false,
@@ -165,33 +165,38 @@ export class AuthStack extends cdk.Stack {
         // No writeAttributes: Cognito rejects a client that cannot write the
         // pool's required attributes, and nobody self-registers here anyway.
       });
-    this.portalClient = clientFor('PortalClient', 'portal');
-    this.bmsClient = clientFor('BmsClient', 'bms');
+    this.portalClient = clientFor(this.portalUserPool, 'PortalClient', 'portal');
+    this.bmsClient = clientFor(this.bmsUserPool, 'BmsClient', 'bms');
 
-    for (const user of props.initialUsers) {
-      new cognito.CfnUserPoolUser(this, `User-${user.email.replace(/[^a-z0-9]/gi, '-')}`, {
-        userPoolId: this.userPool.userPoolId,
-        username: user.email,
-        // No welcome message: it would carry a temporary password, and there
-        // are no passwords. The first email a user sees is a sign-in code.
-        messageAction: 'SUPPRESS',
-        userAttributes: [
-          { name: 'email', value: user.email },
-          { name: 'email_verified', value: 'true' },
-          { name: 'name', value: user.name },
-          { name: 'custom:org', value: user.organisationId },
-          { name: 'custom:role', value: user.role },
-        ],
-      });
-    }
+    // The platform root is the BMS pool's entire membership until organisations
+    // are created from the BMS. No welcome message: it would carry a temporary
+    // password, and there are no passwords. The first email they see is a
+    // sign-in code.
+    new cognito.CfnUserPoolUser(this, 'BmsRootUser', {
+      userPoolId: this.bmsUserPool.userPoolId,
+      username: props.bmsRoot.email,
+      messageAction: 'SUPPRESS',
+      userAttributes: [
+        { name: 'email', value: props.bmsRoot.email },
+        { name: 'email_verified', value: 'true' },
+        { name: 'name', value: props.bmsRoot.name },
+        { name: 'custom:org', value: 'wingtheidea' },
+        { name: 'custom:role', value: 'root' satisfies UserRole },
+      ],
+    });
 
     new cdk.CfnOutput(this, 'PortalClientId', {
       value: this.portalClient.userPoolClientId,
-      description: 'Set as repo variable VITE_COGNITO_CLIENT_ID in RECONFLOW-PORTAL',
+      description: 'Default in the portal; VITE_COGNITO_CLIENT_ID overrides',
+    });
+    new cdk.CfnOutput(this, 'BmsUserPoolId', {
+      value: this.bmsUserPool.userPoolId,
+      description: 'Platform accounts only. Set as VITE_COGNITO_USER_POOL_ID in RECONFLOW-BMS',
     });
     new cdk.CfnOutput(this, 'BmsClientId', {
       value: this.bmsClient.userPoolClientId,
-      description: 'Set as repo variable VITE_COGNITO_CLIENT_ID in RECONFLOW-BMS',
+      description: 'Set as VITE_COGNITO_CLIENT_ID in RECONFLOW-BMS',
     });
+    new cdk.CfnOutput(this, 'Region', { value: this.region });
   }
 }

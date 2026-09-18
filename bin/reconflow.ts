@@ -36,12 +36,10 @@ const auth = new AuthStack(app, 'reconflow-auth', {
   env,
   stackName: `${PREFIX}-auth`,
   synthesizer: importOnly ? new cdk.CliCredentialsStackSynthesizer() : undefined,
-  description: 'ReconFlow sign-in: Cognito user pool with passwordless email one-time codes sent through SES',
+  description: 'ReconFlow sign-in: portal and BMS Cognito user pools with passwordless six-digit email codes sent through SES',
   // The platform root: signs into the BMS and creates organisations, each
   // with an owner. Every other account is provisioned from there.
-  initialUsers: [
-    { email: 'riyad@mobil80.com', name: 'Riyad Rasheed', organisationId: 'wingtheidea', role: 'root' },
-  ],
+  bmsRoot: { email: 'riyad@mobil80.com', name: 'Riyad Rasheed' },
   importOnly,
 });
 

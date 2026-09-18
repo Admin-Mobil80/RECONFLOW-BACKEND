@@ -13,11 +13,11 @@ export async function handler(event: DefineAuthChallengeTriggerEvent): Promise<D
   const last = session[session.length - 1];
   const failures = session.filter((s) => s.challengeName === "CUSTOM_CHALLENGE" && !s.challengeResult).length;
 
-  if (event.request.userNotFound) {
-    // Never reveal that an address is unknown: fail the same way a wrong code does.
-    event.response.issueTokens = false;
-    event.response.failAuthentication = true;
-  } else if (last?.challengeName === "CUSTOM_CHALLENGE" && last.challengeResult) {
+  // An unknown address is deliberately NOT special-cased here: it gets a
+  // challenge like anyone else (the create trigger sends nothing and sets a
+  // code that cannot be guessed), so an attacker cannot tell a real account
+  // from a made-up one by how sign-in responds.
+  if (last?.challengeName === "CUSTOM_CHALLENGE" && last.challengeResult) {
     event.response.issueTokens = true;
     event.response.failAuthentication = false;
   } else if (failures >= MAX_ATTEMPTS) {
