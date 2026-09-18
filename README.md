@@ -45,6 +45,7 @@ Actions OIDC provider exists — created by another product, so this app
 
 | Stack | Region | Contents |
 | --- | --- | --- |
+| `reconflow-data` | ap-south-1 | ReconFlow's core table and documents bucket (retained), plus the five representative source tables for the proof of concept, seeded by a CloudFormation custom resource |
 | `reconflow-certificates` | us-east-1 | ACM certificates for the ReconFlow hostnames (CloudFront accepts certificates only from us-east-1) |
 | `reconflow-portal` | ap-south-1 | CloudFront + Route 53 for `reconflow.wingtheidea.com`, and RECONFLOW-PORTAL's deploy role |
 | `reconflow-bms` | ap-south-1 | CloudFront + Route 53 for `bms.reconflow.wingtheidea.com`, and RECONFLOW-BMS's deploy role |
@@ -126,10 +127,47 @@ aws cloudformation describe-stacks --stack-name reconflow-portal \
   --query 'Stacks[0].Outputs' --output table
 ```
 
+## Code layout
+
+```
+bin/reconflow.ts        the app: which stacks exist, for which account
+lib/                    stacks
+src/domain/             generic model - knows no customer, source or case type
+src/tenants/<org>/      one organisation's configuration: record shapes, seed data
+src/handlers/           Lambda entrypoints (bundled by esbuild at synth time)
+src/lib/                small dependency-free helpers
+```
+
+The line between `domain` and `tenants` is the product boundary. Anything
+that mentions a real system, a real record shape or a real classification
+belongs under a tenant; the platform reads it as configuration.
+
+## Representative data (proof of concept)
+
+The `reconflow-data` stack holds one DynamoDB table per source interface —
+`reconflow-source-procurement`, `-disbursement`, `-treasury`, `-cashroom`,
+`-documents` — deliberately separate, so cross-database evidence gathering in
+the demo is literally that. Documents are real one-page PDFs in the documents
+bucket.
+
+Key layout (see `src/domain/dynamo-keys.ts`): each record is stored once under
+`ORG#<org>` and once more under every reference it carries
+(`ORG#<org>#REF#<name>#<value>`). "Everything that mentions voucher VCH-123" is
+one Query, with no GSI and no knowledge of the schema.
+
+The data is loaded by a CloudFormation custom resource on stack create and
+whenever `SEED_VERSION` in `lib/data-stack.ts` changes — so even dummy data
+arrives through CloudFormation. `npm run seed:preview` prints what would be
+loaded without touching AWS. The first tenant's seed
+(`src/tenants/adb/seed.ts`) is ten refund cases covering the demonstration
+sequence and every exception in the requirement.
+
 ## Application services — not built yet
 
 ReconFlow's backend will be serverless, built from these services (each one a
-CloudFormation resource in this app, like everything else):
+CloudFormation resource in this app, like everything else). The LLM is the
+OpenAI platform, with the key held in Secrets Manager — never in this repo, a
+template or an environment file.
 
 - **Lambda** on the `nodejs24.x` runtime
 - **AppSync** as the primary API

@@ -2,11 +2,18 @@
 import * as cdk from 'aws-cdk-lib';
 import { ACCOUNT, CERTIFICATE_REGION, PREFIX, REGION } from '../lib/account';
 import { CertificatesStack } from '../lib/certificates-stack';
+import { DataStack } from '../lib/data-stack';
 import { StaticSiteStack } from '../lib/static-site-stack';
 
 const app = new cdk.App();
 
 const env: cdk.Environment = { account: ACCOUNT, region: REGION };
+
+const data = new DataStack(app, 'reconflow-data', {
+  env,
+  stackName: `${PREFIX}-data`,
+  description: 'ReconFlow core table, documents bucket, and the representative source databases seeded for the proof of concept',
+});
 
 const PORTAL_DOMAIN = 'reconflow.wingtheidea.com';
 const BMS_DOMAIN = 'bms.reconflow.wingtheidea.com';
@@ -56,10 +63,10 @@ const bms = new StaticSiteStack(app, 'reconflow-bms', {
 
 // The account is shared with four other products, so tags are how ReconFlow's
 // resources stay identifiable.
-for (const stack of [certificates, portal, bms]) {
+for (const stack of [data, certificates, portal, bms]) {
   cdk.Tags.of(stack).add('project', PREFIX);
 }
-for (const stack of [certificates, portal, bms]) {
+for (const stack of [data, certificates, portal, bms]) {
   cdk.Tags.of(stack).add('managed-by', 'cdk');
   cdk.Tags.of(stack).add('repo', 'Admin-Mobil80/RECONFLOW-BACKEND');
 }
