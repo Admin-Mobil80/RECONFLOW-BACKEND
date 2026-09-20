@@ -25,6 +25,7 @@ import type { Organisation } from "../domain/types";
 import { buildPdf } from "../lib/mini-pdf";
 import { applyEvent, EventError, type DemoEvent } from "../tenants/adb/events";
 import type { CreditNote, RefundVoucher } from "../tenants/adb/records";
+import { CREDIT_NOTE_REASONS } from "../tenants/adb/credit-note-reasons";
 import type { Supplier } from "../tenants/adb/suppliers";
 
 const CORE_TABLE = process.env.CORE_TABLE!;
@@ -228,7 +229,7 @@ async function listDemoCases(organisationId: string) {
   const suppliers = (await reader.list("procurement", "supplier"))
     .map((r) => r.attributes as Supplier)
     .sort((a, b) => a.supplierName.localeCompare(b.supplierName));
-  return { cases: cases.sort((a, b) => a.creditNoteNo.localeCompare(b.creditNoteNo)), fundSources, suppliers };
+  return { cases: cases.sort((a, b) => a.creditNoteNo.localeCompare(b.creditNoteNo)), fundSources, suppliers, reasons: CREDIT_NOTE_REASONS };
 }
 
 async function injectEvent(organisationId: string, body: Record<string, unknown>) {
