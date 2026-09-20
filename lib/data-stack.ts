@@ -39,6 +39,8 @@ export class DataStack extends cdk.Stack {
    * Until then the narrator falls back to a deterministic summary.
    */
   public readonly openAiSecret: secretsmanager.Secret;
+  /** Also invoked directly by the BMS with { action: "reset" } to restart the demonstration. */
+  public readonly seedFunction: NodejsFunction;
 
   constructor(scope: Construct, id: string, props: cdk.StackProps) {
     super(scope, id, props);
@@ -82,6 +84,9 @@ export class DataStack extends cdk.Stack {
 
     // --- seed ---------------------------------------------------------------
 
+    const tableNames: Record<string, string> = {};
+    for (const [sourceId, table] of Object.entries(sourceTables)) tableNames[sourceId] = table.tableName;
+
     const seedFunction = new NodejsFunction(this, "SeedFunction", {
       functionName: `${PREFIX}-seed-representative-data`,
       entry: path.join(__dirname, "../src/handlers/seed-representative-data.ts"),
@@ -97,12 +102,23 @@ export class DataStack extends cdk.Stack {
         // The runtime ships the SDK; bundling it would only slow cold starts.
         externalModules: ["@aws-sdk/*"],
       },
+      // For direct invocation ({ action: "reset" }) from the BMS; the custom
+      // resource passes the same values as properties.
+      environment: {
+        SEED_VERSION,
+        ORGANISATION_ID: ADB_ORGANISATION_ID,
+        CORE_TABLE: this.coreTable.tableName,
+        TABLE_NAMES: JSON.stringify(tableNames),
+        DOCUMENTS_BUCKET: this.documentsBucket.bucketName,
+      },
     });
+    this.seedFunction = seedFunction;
 
-    // Read as well as write: the seed checks for, and removes, organisation
-    // items that earlier versions wrote.
+    // Read as well as write everywhere: a reset scans an organisation's items
+    // out of each source table before reloading, and the seed removes
+    // organisation items earlier versions wrote to the core table.
     this.coreTable.grantReadWriteData(seedFunction);
-    for (const table of Object.values(sourceTables)) table.grantWriteData(seedFunction);
+    for (const table of Object.values(sourceTables)) table.grantReadWriteData(seedFunction);
     this.documentsBucket.grantPut(seedFunction);
 
     const provider = new cr.Provider(this, "SeedProvider", {
@@ -112,9 +128,6 @@ export class DataStack extends cdk.Stack {
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       }),
     });
-
-    const tableNames: Record<string, string> = {};
-    for (const [sourceId, table] of Object.entries(sourceTables)) tableNames[sourceId] = table.tableName;
 
     const seed = new cdk.CustomResource(this, "RepresentativeData", {
       serviceToken: provider.serviceToken,

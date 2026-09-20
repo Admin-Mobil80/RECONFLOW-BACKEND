@@ -12,14 +12,27 @@
 
 import { AdminCreateUserCommand, CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { DynamoDBDocumentClient, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import type { LambdaFunctionURLEvent, LambdaFunctionURLResult } from "aws-lambda";
 import { isKnownCurrency } from "../domain/currencies";
+import { itemsForDocument, itemsForRecord } from "../domain/dynamo-keys";
+import { DynamoSourceReader } from "../domain/dynamo-reader";
+import { putItems } from "../domain/dynamo-writer";
 import type { Organisation } from "../domain/types";
+import { buildPdf } from "../lib/mini-pdf";
+import { applyEvent, EventError, type DemoEvent } from "../tenants/adb/events";
+import type { CreditNote, RefundVoucher } from "../tenants/adb/records";
 
 const CORE_TABLE = process.env.CORE_TABLE!;
 const PORTAL_USER_POOL_ID = process.env.PORTAL_USER_POOL_ID!;
+const SOURCE_TABLES = JSON.parse(process.env.SOURCE_TABLES ?? "{}") as Record<string, string>;
+const DOCUMENTS_BUCKET = process.env.DOCUMENTS_BUCKET!;
+const SEED_FUNCTION = process.env.SEED_FUNCTION!;
+const s3 = new S3Client({});
+const lambda = new LambdaClient({});
 
 const verifier = CognitoJwtVerifier.create({
   userPoolId: process.env.BMS_USER_POOL_ID!,
@@ -170,6 +183,103 @@ async function createOrganisation(body: Record<string, unknown>): Promise<Organi
   return { organisationId, name, baseCurrency, ownerEmail, createdAt };
 }
 
+// --- demonstration --------------------------------------------------------------------
+//
+// The representative source systems are dummies, so "new data arriving" is
+// the BMS writing what those systems would have recorded. The portal assesses
+// on request, so the case moves the moment the page is refreshed.
+
+/** Only organisations whose source data uses the ADB record shapes can be driven this way. */
+const DEMO_ORGANISATIONS = new Set(["adb"]);
+
+function demoReader(organisationId: string): DynamoSourceReader {
+  if (!DEMO_ORGANISATIONS.has(organisationId)) {
+    throw new HttpError(400, "Demonstration events are only available for the representative organisation.");
+  }
+  return new DynamoSourceReader(dynamo, SOURCE_TABLES, organisationId);
+}
+
+async function listDemoCases(organisationId: string) {
+  const reader = demoReader(organisationId);
+  const creditNotes = await reader.list("disbursement", "credit-note");
+  const cases = await Promise.all(
+    creditNotes.map(async (record) => {
+      const cn = record.attributes as CreditNote;
+      const vouchers = await reader.byReference("creditNoteNo", cn.creditNoteNo, { sourceId: "disbursement", recordType: "refund-voucher" });
+      const voucher = vouchers[0]?.attributes as RefundVoucher | undefined;
+      const receipts = voucher
+        ? await reader.byReference("referenceNo", voucher.voucherNo, { sourceId: "treasury", recordType: "refund-receipt" })
+        : [];
+      return {
+        creditNoteNo: cn.creditNoteNo,
+        supplierId: cn.supplierId,
+        amount: cn.amount,
+        currency: cn.currency,
+        issuedDate: cn.issuedDate,
+        voucherNo: voucher?.voucherNo,
+        refundChannel: voucher?.refundChannel,
+        treasuryReceipts: receipts.length,
+      };
+    }),
+  );
+  const fundSources = (await reader.list("procurement", "fund-source")).map((r) => r.attributes);
+  return { cases: cases.sort((a, b) => a.creditNoteNo.localeCompare(b.creditNoteNo)), fundSources };
+}
+
+async function injectEvent(organisationId: string, body: Record<string, unknown>) {
+  const reader = demoReader(organisationId);
+  const event = body as unknown as DemoEvent;
+  if (!event || typeof event.type !== "string") throw new HttpError(400, "An event type is required.");
+
+  // New identifiers continue from the highest credit note number in the system.
+  const existing = await reader.list("disbursement", "credit-note");
+  const highest = existing.reduce((max, r) => Math.max(max, Number(r.recordId.split("-").pop()) || 0), 0);
+
+  let outcome;
+  try {
+    outcome = await applyEvent(event, reader, new Date(), highest + 1);
+  } catch (error) {
+    if (error instanceof EventError) throw new HttpError(400, error.message);
+    throw error;
+  }
+
+  const bySource = new Map<string, ReturnType<typeof itemsForRecord>>();
+  for (const record of outcome.records) {
+    bySource.set(record.sourceId, [...(bySource.get(record.sourceId) ?? []), ...itemsForRecord(record)]);
+  }
+  for (const doc of outcome.documents) {
+    const { lines: _lines, ...metadata } = doc;
+    bySource.set("documents", [...(bySource.get("documents") ?? []), ...itemsForDocument(organisationId, metadata)]);
+  }
+  for (const [sourceId, items] of bySource) {
+    const table = SOURCE_TABLES[sourceId];
+    if (!table) throw new HttpError(500, `No table for source ${sourceId}.`);
+    await putItems(dynamo, table, items);
+  }
+  for (const doc of outcome.documents) {
+    await s3.send(new PutObjectCommand({ Bucket: DOCUMENTS_BUCKET, Key: doc.s3Key, Body: buildPdf(doc.lines), ContentType: doc.contentType }));
+  }
+  return {
+    summary: outcome.summary,
+    creditNoteNo: outcome.creditNoteNo,
+    recordsWritten: outcome.records.length,
+    documentsWritten: outcome.documents.length,
+  };
+}
+
+async function resetDemo(organisationId: string, clearDecisions: boolean) {
+  demoReader(organisationId);
+  const result = await lambda.send(
+    new InvokeCommand({
+      FunctionName: SEED_FUNCTION,
+      Payload: Buffer.from(JSON.stringify({ action: "reset", clearDecisions })),
+    }),
+  );
+  const payload = JSON.parse(Buffer.from(result.Payload ?? new Uint8Array()).toString("utf8") || "{}") as Record<string, unknown>;
+  if (result.FunctionError) throw new HttpError(500, `Reset failed: ${String(payload.errorMessage ?? result.FunctionError)}`);
+  return payload;
+}
+
 export async function handler(event: LambdaFunctionURLEvent): Promise<LambdaFunctionURLResult> {
   try {
     await requireRoot(event);
@@ -189,6 +299,32 @@ export async function handler(event: LambdaFunctionURLEvent): Promise<LambdaFunc
         throw new HttpError(400, "Malformed request.");
       }
       return json(201, { organisation: await createOrganisation(body) });
+    }
+    const demoCases = path.match(/^\/organisations\/([^/]+)\/demo\/cases$/);
+    if (demoCases && method === "GET") {
+      return json(200, await listDemoCases(decodeURIComponent(demoCases[1])));
+    }
+    const demoEvent = path.match(/^\/organisations\/([^/]+)\/demo\/events$/);
+    if (demoEvent && method === "POST") {
+      let body: Record<string, unknown>;
+      try {
+        const raw = event.isBase64Encoded ? Buffer.from(event.body ?? "", "base64").toString("utf8") : (event.body ?? "");
+        body = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        throw new HttpError(400, "Malformed request.");
+      }
+      return json(201, await injectEvent(decodeURIComponent(demoEvent[1]), body));
+    }
+    const demoReset = path.match(/^\/organisations\/([^/]+)\/demo\/reset$/);
+    if (demoReset && method === "POST") {
+      let body: Record<string, unknown> = {};
+      try {
+        const raw = event.isBase64Encoded ? Buffer.from(event.body ?? "", "base64").toString("utf8") : (event.body ?? "");
+        body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+      } catch {
+        throw new HttpError(400, "Malformed request.");
+      }
+      return json(200, await resetDemo(decodeURIComponent(demoReset[1]), body.clearDecisions === true));
     }
     throw new HttpError(404, "Not found.");
   } catch (error) {

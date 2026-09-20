@@ -115,6 +115,10 @@ const bms = new StaticSiteStack(app, 'reconflow-bms', {
           portalUserPool: auth.portalUserPool,
           bmsUserPool: auth.bmsUserPool,
           bmsClientId: auth.bmsClient.userPoolClientId,
+          // Demonstration: inject source-system events and reset the seed.
+          sourceTables: data.sourceTables,
+          documentsBucket: data.documentsBucket,
+          seedFunction: data.seedFunction,
         }
       : undefined,
 });

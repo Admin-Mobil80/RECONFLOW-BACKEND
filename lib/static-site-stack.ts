@@ -58,6 +58,11 @@ export interface AdminApiProps {
   /** Whose tokens the API accepts. */
   readonly bmsUserPool: cognito.IUserPool;
   readonly bmsClientId: string;
+  /** The representative source systems the demonstration writes into. */
+  readonly sourceTables: Readonly<Record<string, dynamodb.ITable>>;
+  readonly documentsBucket: s3.IBucket;
+  /** Invoked with { action: "reset" } to put the demonstration back to its start. */
+  readonly seedFunction: lambda.IFunction;
 }
 
 export interface ContactFormProps {
@@ -328,10 +333,20 @@ export class StaticSiteStack extends cdk.Stack {
         PORTAL_USER_POOL_ID: config.portalUserPool.userPoolId,
         BMS_USER_POOL_ID: config.bmsUserPool.userPoolId,
         BMS_CLIENT_ID: config.bmsClientId,
+        SOURCE_TABLES: JSON.stringify(
+          Object.fromEntries(Object.entries(config.sourceTables).map(([id, table]) => [id, table.tableName])),
+        ),
+        DOCUMENTS_BUCKET: config.documentsBucket.bucketName,
+        SEED_FUNCTION: config.seedFunction.functionName,
       },
     });
 
     config.coreTable.grantReadWriteData(fn);
+    // The demonstration writes into the representative source systems and
+    // their document repository, and can ask the seed to reset them.
+    for (const table of Object.values(config.sourceTables)) table.grantReadWriteData(fn);
+    config.documentsBucket.grantPut(fn);
+    config.seedFunction.grantInvoke(fn);
     // Create owners in the portal pool - and nothing in the BMS pool, which
     // this function can only read tokens from.
     fn.addToRolePolicy(
