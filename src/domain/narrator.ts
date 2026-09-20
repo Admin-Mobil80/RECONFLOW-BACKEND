@@ -36,7 +36,7 @@ async function apiKey(): Promise<string | null> {
 const SYSTEM_PROMPT = [
   "You write case summaries for a finance Control Team reviewing supplier refunds.",
   "You are given verified facts produced by deterministic rules. Do not add facts, do not speculate, and do not change any classification, amount or verdict.",
-  "Write 4 to 6 sentences of plain prose, no headings or bullet points, in British English.",
+  "Write three or four short paragraphs of plain prose separated by a blank line - no headings, no bullet points - in British English.",
   "Cover, in this order: what the refund is (credit note, invoice, supplier, amount); where the money came from originally (the fund); whether and how the refund has come back and whether Treasury has confirmed it; the recommended classification and how confident the rules are; and what the reviewer should do next.",
   "Refer to identifiers exactly as given. Treat 'Action required' lines as the recommended next step.",
 ].join(" ");
@@ -72,6 +72,7 @@ export async function narrate(caseId: string, facts: readonly string[]): Promise
   }
 }
 
+/** One fact per line; the portal renders line breaks as written. */
 function deterministic(facts: readonly string[]): string {
-  return facts.join(" ");
+  return facts.join("\n");
 }

@@ -726,7 +726,7 @@ function summaryFacts(
   facts.push(
     readiness.verdict === "ready"
       ? "All readiness checks pass."
-      : `Not ready: ${failedChecks.map((c) => c.label.toLowerCase()).join("; ")}.`,
+      : `Not ready. Checks that failed: ${failedChecks.map((c) => c.label).join("; ")}.`,
   );
   facts.push(`Recommended classification: ${classification.label} (${classification.confidence}% confidence). ${classification.rule}`);
   for (const e of exceptions) facts.push(`${e.title}: ${e.detail} Action required: ${e.actionRequired}`);
