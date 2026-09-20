@@ -19,7 +19,7 @@ export const ADB_ORGANISATION_ID = "adb";
 
 /** Which record types each representative source holds — the Data Distribution Matrix. */
 export const ADB_SOURCES = {
-  procurement: ["contract", "invoice", "fund-source", "credit-note"],
+  procurement: ["supplier", "contract", "invoice", "fund-source", "credit-note"],
   disbursement: [
     "contract",
     "invoice",

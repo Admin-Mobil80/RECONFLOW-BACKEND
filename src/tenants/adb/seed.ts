@@ -27,6 +27,7 @@ import {
   type TreasuryReceipt,
   type TreasuryVoucherStatus,
 } from "./records";
+import { SUPPLIERS, type Supplier } from "./suppliers";
 
 export interface SeedDocument extends DocumentRecord {
   /** Rendered into the PDF, one line each. ASCII only. */
@@ -67,18 +68,18 @@ const FUND_SOURCES: readonly FundSource[] = [
   },
 ];
 
-interface Supplier {
-  readonly supplierId: string;
-  readonly name: string;
-}
-
-const SUPPLIERS: Record<string, Supplier> = {
-  meridian: { supplierId: "S-1001", name: "Meridian Engineering Consultants" },
-  pacific: { supplierId: "S-1002", name: "Pacific Data Systems" },
-  anand: { supplierId: "S-1003", name: "Anand Infrastructure Advisory" },
-  luzon: { supplierId: "S-1004", name: "Luzon Survey Partners" },
-  mekong: { supplierId: "S-1005", name: "Mekong Logistics" },
-  indus: { supplierId: "S-1006", name: "Indus Water Consultants" },
+const bySupplierId = (id: string): Supplier => {
+  const found = SUPPLIERS.find((s) => s.supplierId === id);
+  if (!found) throw new Error(`Seed refers to unknown supplier ${id}`);
+  return found;
+};
+const SUPPLIERS_BY_KEY: Record<string, Supplier> = {
+  meridian: bySupplierId("S-1001"),
+  pacific: bySupplierId("S-1002"),
+  anand: bySupplierId("S-1003"),
+  luzon: bySupplierId("S-1004"),
+  mekong: bySupplierId("S-1005"),
+  indus: bySupplierId("S-1006"),
 };
 
 // --- scenario specification ---------------------------------------------------
@@ -131,7 +132,7 @@ const SCENARIOS: readonly CaseSpec[] = [
     seq: 1,
     title: "Electronic refund, complete package",
     demonstrates: "Happy path: ready, classified Electronic with high confidence",
-    supplier: SUPPLIERS.meridian,
+    supplier: SUPPLIERS_BY_KEY.meridian,
     contractFunds: ["FS-OCR"],
     invoiceFund: "FS-OCR",
     currency: "USD",
@@ -149,7 +150,7 @@ const SCENARIOS: readonly CaseSpec[] = [
     seq: 2,
     title: "Trust Fund refund, complete package",
     demonstrates: "Trust Fund Refund classification: money must return to the donor-financed fund",
-    supplier: SUPPLIERS.pacific,
+    supplier: SUPPLIERS_BY_KEY.pacific,
     contractFunds: ["FS-TF-CR"],
     invoiceFund: "FS-TF-CR",
     currency: "USD",
@@ -167,7 +168,7 @@ const SCENARIOS: readonly CaseSpec[] = [
     seq: 3,
     title: "Refund received in a different currency",
     demonstrates: "Currency mismatch: USD invoice, PHP received; Currency Purchase Required",
-    supplier: SUPPLIERS.luzon,
+    supplier: SUPPLIERS_BY_KEY.luzon,
     contractFunds: ["FS-OCR"],
     invoiceFund: "FS-OCR",
     currency: "USD",
@@ -184,7 +185,7 @@ const SCENARIOS: readonly CaseSpec[] = [
     seq: 4,
     title: "Cash deposit without proof",
     demonstrates: "Missing documentation: no deposit slip, so not ready",
-    supplier: SUPPLIERS.anand,
+    supplier: SUPPLIERS_BY_KEY.anand,
     contractFunds: ["FS-TASF"],
     invoiceFund: "FS-TASF",
     currency: "USD",
@@ -201,7 +202,7 @@ const SCENARIOS: readonly CaseSpec[] = [
     seq: 5,
     title: "Electronic refund not yet received",
     demonstrates: "Awaiting Treasury confirmation; Electronic Transfer Required from the supplier",
-    supplier: SUPPLIERS.mekong,
+    supplier: SUPPLIERS_BY_KEY.mekong,
     contractFunds: ["FS-OCR"],
     invoiceFund: "FS-OCR",
     currency: "USD",
@@ -218,7 +219,7 @@ const SCENARIOS: readonly CaseSpec[] = [
     seq: 6,
     title: "Treasury receipt quotes the wrong reference",
     demonstrates: "Reference mismatch: receipt exists but cannot be tied to the voucher",
-    supplier: SUPPLIERS.meridian,
+    supplier: SUPPLIERS_BY_KEY.meridian,
     contractFunds: ["FS-OCR"],
     invoiceFund: "FS-OCR",
     currency: "USD",
@@ -235,7 +236,7 @@ const SCENARIOS: readonly CaseSpec[] = [
     seq: 7,
     title: "Cash Room refund, complete package",
     demonstrates: "Cash Room classification with deposit slip and Treasury confirmation",
-    supplier: SUPPLIERS.anand,
+    supplier: SUPPLIERS_BY_KEY.anand,
     contractFunds: ["FS-TASF"],
     invoiceFund: "FS-TASF",
     currency: "USD",
@@ -253,7 +254,7 @@ const SCENARIOS: readonly CaseSpec[] = [
     seq: 8,
     title: "Multi-funded contract with conflicting funding records",
     demonstrates: "Complex scenario: Procurement and Disbursement disagree on which fund paid",
-    supplier: SUPPLIERS.indus,
+    supplier: SUPPLIERS_BY_KEY.indus,
     contractFunds: ["FS-OCR", "FS-TF-RC"],
     invoiceFund: "FS-OCR",
     disbursementInvoiceFund: "FS-TF-RC",
@@ -271,7 +272,7 @@ const SCENARIOS: readonly CaseSpec[] = [
     seq: 9,
     title: "No Treasury receipt after two weeks",
     demonstrates: "Aging case: stale while awaiting Treasury, escalation recommended",
-    supplier: SUPPLIERS.pacific,
+    supplier: SUPPLIERS_BY_KEY.pacific,
     contractFunds: ["FS-OCR"],
     invoiceFund: "FS-OCR",
     currency: "USD",
@@ -289,7 +290,7 @@ const SCENARIOS: readonly CaseSpec[] = [
     seq: 10,
     title: "Amount received differs from credit note",
     demonstrates: "Amount not verified: Treasury received less than the credit note value",
-    supplier: SUPPLIERS.mekong,
+    supplier: SUPPLIERS_BY_KEY.mekong,
     contractFunds: ["FS-TASF"],
     invoiceFund: "FS-TASF",
     currency: "USD",
@@ -371,7 +372,7 @@ function buildCase(spec: CaseSpec, now: Date): { records: SourceRecord[]; docume
   const invoiceNo = `INV-2026-${n}`;
   const creditNoteNo = `CN-2026-${n}`;
   const voucherNo = `VCH-2026-${n}`;
-  const { supplierId, name: supplierName } = spec.supplier;
+  const { supplierId, supplierName } = spec.supplier;
 
   const creditIssued = daysAgo(now, spec.creditDaysAgo);
   const contractSigned = daysAgo(now, spec.creditDaysAgo + 120);
@@ -647,6 +648,10 @@ export function buildAdbSeed(now: Date): SeedData {
     for (const fund of FUND_SOURCES) {
       records.push(record(sourceId, "fund-source", fund.fundSourceId, { fundSourceId: fund.fundSourceId }, fund, fundsSeeded));
     }
+  }
+  // The vendor master lives in Procurement.
+  for (const supplier of SUPPLIERS) {
+    records.push(record("procurement", "supplier", supplier.supplierId, { supplierId: supplier.supplierId }, supplier, fundsSeeded));
   }
 
   for (const spec of SCENARIOS) {

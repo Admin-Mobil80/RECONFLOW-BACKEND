@@ -27,6 +27,7 @@ import {
   type TreasuryReceipt,
   type TreasuryVoucherStatus,
 } from "./records";
+import type { Supplier } from "./suppliers";
 
 export interface EventDocument extends DocumentRecord {
   readonly lines: readonly string[];
@@ -156,11 +157,10 @@ export async function applyEvent(event: DemoEvent, reader: SourceReader, now: Da
       let supplierId: string;
       let supplierName: string;
       if (event.supplierId) {
-        const held = await reader.byReference("supplierId", event.supplierId, { sourceId: "procurement", recordType: "contract" });
-        const existing = held[0]?.attributes as Contract | undefined;
-        if (!existing) throw new EventError(`No supplier ${event.supplierId} holds a contract.`);
-        supplierId = existing.supplierId;
-        supplierName = existing.supplierName;
+        const master = (await reader.get("procurement", "supplier", event.supplierId))?.attributes as Supplier | undefined;
+        if (!master) throw new EventError(`No supplier ${event.supplierId} in the vendor master.`);
+        supplierId = master.supplierId;
+        supplierName = master.supplierName;
       } else {
         supplierName = (event.supplierName ?? "").trim();
         if (!supplierName) throw new EventError("Choose a supplier or name a new one.");
