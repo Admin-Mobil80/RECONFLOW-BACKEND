@@ -44,7 +44,10 @@ export interface EventOutcome {
 export type DemoEvent =
   | {
       readonly type: "credit-note";
-      readonly supplierName: string;
+      /** An existing supplier's id; its name is taken from its contract. */
+      readonly supplierId?: string;
+      /** Used when supplierId is absent: a supplier new to the systems. */
+      readonly supplierName?: string;
       readonly fundSourceId: string;
       readonly currency: string;
       readonly invoiceAmount: number;
@@ -149,15 +152,28 @@ export async function applyEvent(event: DemoEvent, reader: SourceReader, now: Da
       const contractNo = `CTR-2026-${n}`;
       const invoiceNo = `INV-2026-${n}`;
       const creditNoteNo = `CN-2026-${n}`;
-      const supplierId = `S-2${n}`;
+
+      let supplierId: string;
+      let supplierName: string;
+      if (event.supplierId) {
+        const held = await reader.byReference("supplierId", event.supplierId, { sourceId: "procurement", recordType: "contract" });
+        const existing = held[0]?.attributes as Contract | undefined;
+        if (!existing) throw new EventError(`No supplier ${event.supplierId} holds a contract.`);
+        supplierId = existing.supplierId;
+        supplierName = existing.supplierName;
+      } else {
+        supplierName = (event.supplierName ?? "").trim();
+        if (!supplierName) throw new EventError("Choose a supplier or name a new one.");
+        supplierId = `S-2${n}`;
+      }
       const signed = new Date(now.getTime() - 120 * 86_400_000).toISOString();
       const paid = new Date(now.getTime() - 30 * 86_400_000).toISOString();
 
       const contract: Contract = {
         contractNo,
         supplierId,
-        supplierName: event.supplierName,
-        title: `TA services - ${event.supplierName}`,
+        supplierName,
+        title: `TA services - ${supplierName}`,
         currency: event.currency,
         totalAmount: event.invoiceAmount * 4,
         fundSourceIds: [event.fundSourceId],
@@ -200,7 +216,7 @@ export async function applyEvent(event: DemoEvent, reader: SourceReader, now: Da
         `Credit note no: ${creditNoteNo}`,
         `Against invoice: ${invoiceNo}`,
         `Contract: ${contractNo}`,
-        `Supplier: ${event.supplierName} (${supplierId})`,
+        `Supplier: ${supplierName} (${supplierId})`,
         `Amount: ${money(event.creditAmount, event.currency)}`,
         `Reason: ${event.reason}`,
         `Issued: ${day}`,
@@ -209,7 +225,7 @@ export async function applyEvent(event: DemoEvent, reader: SourceReader, now: Da
         records,
         documents: [doc],
         creditNoteNo,
-        summary: `${event.supplierName} issued credit note ${creditNoteNo} for ${money(event.creditAmount, event.currency)} against ${invoiceNo} (paid from ${fund.name}).`,
+        summary: `${supplierName} issued credit note ${creditNoteNo} for ${money(event.creditAmount, event.currency)} against ${invoiceNo} (paid from ${fund.name}).`,
       };
     }
 

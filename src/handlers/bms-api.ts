@@ -24,7 +24,7 @@ import { putItems } from "../domain/dynamo-writer";
 import type { Organisation } from "../domain/types";
 import { buildPdf } from "../lib/mini-pdf";
 import { applyEvent, EventError, type DemoEvent } from "../tenants/adb/events";
-import type { CreditNote, RefundVoucher } from "../tenants/adb/records";
+import type { Contract, CreditNote, RefundVoucher } from "../tenants/adb/records";
 
 const CORE_TABLE = process.env.CORE_TABLE!;
 const PORTAL_USER_POOL_ID = process.env.PORTAL_USER_POOL_ID!;
@@ -223,7 +223,17 @@ async function listDemoCases(organisationId: string) {
     }),
   );
   const fundSources = (await reader.list("procurement", "fund-source")).map((r) => r.attributes);
-  return { cases: cases.sort((a, b) => a.creditNoteNo.localeCompare(b.creditNoteNo)), fundSources };
+  // Suppliers are whoever holds a contract; one entry per supplier id.
+  const suppliers = new Map<string, string>();
+  for (const contract of await reader.list("procurement", "contract")) {
+    const { supplierId, supplierName } = contract.attributes as Contract;
+    suppliers.set(supplierId, supplierName);
+  }
+  return {
+    cases: cases.sort((a, b) => a.creditNoteNo.localeCompare(b.creditNoteNo)),
+    fundSources,
+    suppliers: [...suppliers].map(([supplierId, supplierName]) => ({ supplierId, supplierName })).sort((a, b) => a.supplierName.localeCompare(b.supplierName)),
+  };
 }
 
 async function injectEvent(organisationId: string, body: Record<string, unknown>) {
