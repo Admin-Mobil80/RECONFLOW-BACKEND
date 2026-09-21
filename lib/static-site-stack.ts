@@ -52,6 +52,10 @@ export interface PortalApiProps {
 }
 
 export interface AdminApiProps {
+  /** Sender for the notifications this API sends when an account is created. */
+  readonly contact: ContactFormProps;
+  /** The permanent platform root, which cannot be disabled from the BMS. */
+  readonly bmsRootEmail: string;
   readonly coreTable: dynamodb.ITable;
   /** Where organisation owners are created. */
   readonly portalUserPool: cognito.IUserPool;
@@ -140,8 +144,8 @@ export class StaticSiteStack extends cdk.Stack {
       ],
     });
 
-    if (props.portalApi) this.addPortalApi(distribution, props.portalApi);
-    if (props.adminApi) this.addAdminApi(distribution, props.adminApi);
+    if (props.portalApi) this.addPortalApi(distribution, props.portalApi, domainName);
+    if (props.adminApi) this.addAdminApi(distribution, props.adminApi, domainName);
 
     const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', {
       hostedZoneId: HOSTED_ZONE_ID,
@@ -252,7 +256,7 @@ export class StaticSiteStack extends cdk.Stack {
    * Reads the source tables and the documents bucket; writes only decisions
    * into the core table. Nothing here can touch a source system.
    */
-  private addPortalApi(distribution: cloudfront.Distribution, config: PortalApiProps): void {
+  private addPortalApi(distribution: cloudfront.Distribution, config: PortalApiProps, domainName: string): void {
     const sourceTables: Record<string, string> = {};
     for (const [sourceId, table] of Object.entries(config.sourceTables)) sourceTables[sourceId] = table.tableName;
 
@@ -275,6 +279,7 @@ export class StaticSiteStack extends cdk.Stack {
         FROM_NAME: config.contact.fromName,
         TO_ADDRESS: config.contact.toAddress,
         PRODUCT_NAME: config.contact.fromName,
+        SITE_URL: `https://${domainName}`,
         CORE_TABLE: config.coreTable.tableName,
         DOCUMENTS_BUCKET: config.documentsBucket.bucketName,
         SOURCE_TABLES: JSON.stringify(sourceTables),
@@ -324,7 +329,7 @@ export class StaticSiteStack extends cdk.Stack {
    * function verifies the caller's ID token against the BMS user pool and
    * creates organisation owners in the portal's pool.
    */
-  private addAdminApi(distribution: cloudfront.Distribution, config: AdminApiProps): void {
+  private addAdminApi(distribution: cloudfront.Distribution, config: AdminApiProps, domainName: string): void {
     const fn = new NodejsFunction(this, 'AdminApiFunction', {
       entry: path.join(__dirname, '../src/handlers/bms-api.ts'),
       runtime: lambda.Runtime.NODEJS_24_X,
@@ -337,10 +342,16 @@ export class StaticSiteStack extends cdk.Stack {
       // aws-jwt-verify is not in the runtime, so it is bundled; the SDK is.
       bundling: { target: 'node24', externalModules: ['@aws-sdk/*'] },
       environment: {
+        SES_REGION: config.contact.sesRegion,
+        FROM_ADDRESS: config.contact.fromAddress,
+        FROM_NAME: config.contact.fromName,
+        PRODUCT_NAME: config.contact.fromName,
+        SITE_URL: `https://${domainName}`,
         CORE_TABLE: config.coreTable.tableName,
         PORTAL_USER_POOL_ID: config.portalUserPool.userPoolId,
         BMS_USER_POOL_ID: config.bmsUserPool.userPoolId,
         BMS_CLIENT_ID: config.bmsClientId,
+        BMS_ROOT_EMAIL: config.bmsRootEmail,
         SOURCE_TABLES: JSON.stringify(
           Object.fromEntries(Object.entries(config.sourceTables).map(([id, table]) => [id, table.tableName])),
         ),
@@ -355,12 +366,31 @@ export class StaticSiteStack extends cdk.Stack {
     for (const table of Object.values(config.sourceTables)) table.grantReadWriteData(fn);
     config.documentsBucket.grantPut(fn);
     config.seedFunction.grantInvoke(fn);
-    // Create owners in the portal pool - and nothing in the BMS pool, which
-    // this function can only read tokens from.
+    // Create owners in the portal pool; create and suspend platform staff in
+    // the BMS pool. Neither pool's users can be deleted from here.
     fn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['cognito-idp:AdminCreateUser', 'cognito-idp:AdminGetUser'],
         resources: [config.portalUserPool.userPoolArn],
+      }),
+    );
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'cognito-idp:AdminCreateUser',
+          'cognito-idp:AdminDisableUser',
+          'cognito-idp:AdminEnableUser',
+          'cognito-idp:AdminGetUser',
+        ],
+        resources: [config.bmsUserPool.userPoolArn],
+      }),
+    );
+    // Send only as the configured address, as the portal API does.
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ses:SendEmail'],
+        resources: [`arn:aws:ses:${config.contact.sesRegion}:${this.account}:identity/${config.contact.sesIdentityDomain}`],
+        conditions: { StringEquals: { 'ses:FromAddress': config.contact.fromAddress } },
       }),
     );
 

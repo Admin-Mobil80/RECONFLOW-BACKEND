@@ -18,6 +18,9 @@ import { StaticSiteStack } from '../lib/static-site-stack';
 
 const app = new cdk.App();
 
+/** The permanent platform account. Administrators are added from the BMS. */
+const BMS_ROOT = { email: 'riyad@mobil80.com', name: 'Riyad Rasheed' } as const;
+
 const env: cdk.Environment = { account: ACCOUNT, region: REGION };
 
 const data = new DataStack(app, 'reconflow-data', {
@@ -39,7 +42,7 @@ const auth = new AuthStack(app, 'reconflow-auth', {
   description: 'ReconFlow sign-in: portal and BMS Cognito user pools with passwordless six-digit email codes sent through SES',
   // The platform root: signs into the BMS and creates organisations, each
   // with an owner. Every other account is provisioned from there.
-  bmsRoot: { email: 'riyad@mobil80.com', name: 'Riyad Rasheed' },
+  bmsRoot: BMS_ROOT,
   importOnly,
 });
 
@@ -111,6 +114,14 @@ const bms = new StaticSiteStack(app, 'reconflow-bms', {
   adminApi:
     auth.bmsUserPool && auth.bmsClient
       ? {
+          contact: {
+            toAddress: ENQUIRIES_TO_ADDRESS,
+            fromAddress: MAIL_FROM_ADDRESS,
+            fromName: MAIL_FROM_NAME,
+            sesRegion: SES_REGION,
+            sesIdentityDomain: SES_IDENTITY_DOMAIN,
+          },
+          bmsRootEmail: BMS_ROOT.email,
           coreTable: data.coreTable,
           portalUserPool: auth.portalUserPool,
           bmsUserPool: auth.bmsUserPool,

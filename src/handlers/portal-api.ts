@@ -39,6 +39,7 @@ import { LiveFxRates } from "../domain/fx-live";
 import { narrate } from "../domain/narrator";
 import type { Money, Organisation } from "../domain/types";
 import { handleContact, json, parseBody } from "../portal/contact";
+import { sendUserAddedEmails } from "../portal/notify";
 import type { Contract, CreditNote } from "../tenants/adb/records";
 import { supplierRefund } from "../tenants/adb/case-types/supplier-refund";
 
@@ -325,6 +326,8 @@ interface OrganisationUser {
   readonly status: "active" | "disabled";
   readonly createdAt: string;
   readonly createdBy?: string;
+  /** False when the account was created but its welcome email would not send. */
+  readonly notified?: boolean;
 }
 
 function requireAdministrator(caller: Caller): void {
@@ -378,8 +381,8 @@ async function createUser(caller: Caller, body: Record<string, unknown>): Promis
     createdAt: new Date().toISOString(),
     createdBy: caller.email,
   };
-  // No welcome message: it would carry a temporary password, and there are
-  // no passwords - their first email from ReconFlow is a sign-in code.
+  // Cognito sends nothing (SUPPRESS): its own invitation carries a temporary
+  // password, and there are no passwords here. We send our own below.
   try {
     await cognito.send(
       new AdminCreateUserCommand({
@@ -404,7 +407,23 @@ async function createUser(caller: Caller, body: Record<string, unknown>): Promis
   await dynamo.send(
     new PutCommand({ TableName: CORE_TABLE, Item: { PK: `ORG#${caller.organisationId}`, SK: `USER#${email}`, ...user } }),
   );
-  return user;
+
+  // The account exists now. A notification that will not send is worth
+  // reporting, not worth undoing the account over.
+  let notified = true;
+  try {
+    const organisation = (await organisationOf(caller)) as Organisation & { ownerEmail?: string };
+    await sendUserAddedEmails(
+      user,
+      { email: caller.email, name: caller.name },
+      organisation.name ?? caller.organisationId.toUpperCase(),
+      organisation.ownerEmail ? { email: organisation.ownerEmail } : undefined,
+    );
+  } catch (error) {
+    notified = false;
+    console.error("user added but notification failed", { email, error });
+  }
+  return { ...user, notified };
 }
 
 async function setUserEnabled(caller: Caller, email: string, enabled: boolean): Promise<OrganisationUser> {

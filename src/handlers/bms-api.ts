@@ -2,18 +2,25 @@
  * The BMS API: platform administration, reached through the BMS site's
  * CloudFront distribution at /api/*.
  *
- * Every call must carry an ID token from the BMS user pool with the root
- * role. That pool holds the platform root and nobody else, so the check is
- * belt and braces over pool membership.
+ * Every call must carry an ID token from the BMS user pool. That pool holds
+ * the platform's own people - the root and the administrators it adds - and
+ * nobody else, so the role check is belt and braces over pool membership.
  *
  *   GET  /organisations   list organisations
  *   POST /organisations   create one and its owner account in the portal pool
+ *   GET  /users           list platform accounts
+ *   POST /users           add an administrator to the BMS pool
  */
 
-import { AdminCreateUserCommand, CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
+import {
+  AdminCreateUserCommand,
+  AdminDisableUserCommand,
+  AdminEnableUserCommand,
+  CognitoIdentityProviderClient,
+} from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
-import { DynamoDBDocumentClient, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import type { LambdaFunctionURLEvent, LambdaFunctionURLResult } from "aws-lambda";
@@ -23,6 +30,7 @@ import { DynamoSourceReader } from "../domain/dynamo-reader";
 import { putItems } from "../domain/dynamo-writer";
 import type { Organisation } from "../domain/types";
 import { buildPdf } from "../lib/mini-pdf";
+import { sendPlatformUserAddedEmail } from "../portal/notify";
 import { applyEvent, EventError, type DemoEvent } from "../tenants/adb/events";
 import type { CreditNote, RefundVoucher } from "../tenants/adb/records";
 import { CREDIT_NOTE_REASONS } from "../tenants/adb/credit-note-reasons";
@@ -30,6 +38,8 @@ import type { Supplier } from "../tenants/adb/suppliers";
 
 const CORE_TABLE = process.env.CORE_TABLE!;
 const PORTAL_USER_POOL_ID = process.env.PORTAL_USER_POOL_ID!;
+const BMS_USER_POOL_ID = process.env.BMS_USER_POOL_ID!;
+const ROOT_EMAIL = (process.env.BMS_ROOT_EMAIL ?? "").toLowerCase();
 const SOURCE_TABLES = JSON.parse(process.env.SOURCE_TABLES ?? "{}") as Record<string, string>;
 const DOCUMENTS_BUCKET = process.env.DOCUMENTS_BUCKET!;
 const SEED_FUNCTION = process.env.SEED_FUNCTION!;
@@ -77,7 +87,13 @@ function json(statusCode: number, body: unknown): LambdaFunctionURLResult {
   };
 }
 
-async function requireRoot(event: LambdaFunctionURLEvent): Promise<void> {
+interface Caller {
+  readonly email: string;
+  readonly name?: string;
+  readonly role: "root" | "administrator";
+}
+
+async function requirePlatform(event: LambdaFunctionURLEvent): Promise<Caller> {
   // The token arrives in x-id-token, not Authorization: CloudFront replaces
   // Authorization with its own SigV4 signature for the function URL. The
   // Bearer form is accepted too, for direct invocation in tests.
@@ -90,7 +106,15 @@ async function requireRoot(event: LambdaFunctionURLEvent): Promise<void> {
   } catch {
     throw new HttpError(401, "Your session has expired. Sign in again.");
   }
-  if (claims["custom:role"] !== "root") throw new HttpError(403, "Only platform accounts may use the BMS.");
+  const role = claims["custom:role"];
+  if (role !== "root" && role !== "administrator") {
+    throw new HttpError(403, "Only platform accounts may use the BMS.");
+  }
+  return {
+    email: String(claims.email ?? "").toLowerCase(),
+    name: claims.name ? String(claims.name) : undefined,
+    role,
+  };
 }
 
 async function listOrganisations(): Promise<OrganisationSummary[]> {
@@ -295,9 +319,119 @@ async function resetDemo(organisationId: string, clearDecisions: boolean) {
   return payload;
 }
 
+// --- platform accounts -------------------------------------------------------
+//
+// The BMS pool holds the platform's own people. The root is created by the
+// auth stack and is permanent; administrators are added here and can be
+// suspended, never deleted, so the record of who did what survives.
+
+const PLATFORM_PK = "PLATFORM";
+
+interface PlatformUser {
+  readonly email: string;
+  readonly name: string;
+  readonly role: "root" | "administrator";
+  readonly status: "active" | "disabled";
+  readonly createdAt: string;
+  readonly createdBy?: string;
+  /** False when the account was created but its welcome email would not send. */
+  readonly notified?: boolean;
+}
+
+async function listPlatformUsers(): Promise<PlatformUser[]> {
+  const result = await dynamo.send(
+    new QueryCommand({
+      TableName: CORE_TABLE,
+      KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+      ExpressionAttributeValues: { ":pk": PLATFORM_PK, ":sk": "USER#" },
+    }),
+  );
+  const users = (result.Items ?? []).map((item) => {
+    const { PK: _pk, SK: _sk, ...user } = item;
+    return user as unknown as PlatformUser;
+  });
+  // The root comes from the auth stack, so nothing wrote a record of them.
+  if (ROOT_EMAIL && !users.some((u) => u.email === ROOT_EMAIL)) {
+    users.unshift({ email: ROOT_EMAIL, name: "Platform root", role: "root", status: "active", createdAt: "" });
+  }
+  return users.sort((a, b) => (a.role === b.role ? a.email.localeCompare(b.email) : a.role === "root" ? -1 : 1));
+}
+
+async function createPlatformUser(caller: Caller, body: Record<string, unknown>): Promise<PlatformUser> {
+  const email = String(body.email ?? "").trim().toLowerCase();
+  const name = String(body.name ?? "").trim();
+  if (!EMAIL_RE.test(email) || email.length > 320) throw new HttpError(400, "Email address looks invalid.");
+  if (!name || name.length > 120) throw new HttpError(400, "Name is required (up to 120 characters).");
+
+  const user: PlatformUser = {
+    email,
+    name,
+    // There is exactly one root, created with the pool itself.
+    role: "administrator",
+    status: "active",
+    createdAt: new Date().toISOString(),
+    createdBy: caller.email,
+  };
+  try {
+    await cognito.send(
+      new AdminCreateUserCommand({
+        UserPoolId: BMS_USER_POOL_ID,
+        Username: email,
+        MessageAction: "SUPPRESS",
+        UserAttributes: [
+          { Name: "email", Value: email },
+          { Name: "email_verified", Value: "true" },
+          { Name: "name", Value: name },
+          { Name: "custom:org", Value: "wingtheidea" },
+          { Name: "custom:role", Value: user.role },
+        ],
+      }),
+    );
+  } catch (error) {
+    if ((error as { name?: string }).name === "UsernameExistsException") {
+      throw new HttpError(409, `${email} already has a platform account.`);
+    }
+    throw error;
+  }
+  await dynamo.send(new PutCommand({ TableName: CORE_TABLE, Item: { PK: PLATFORM_PK, SK: `USER#${email}`, ...user } }));
+
+  let notified = true;
+  try {
+    await sendPlatformUserAddedEmail(user, { email: caller.email, name: caller.name }, ROOT_EMAIL);
+  } catch (error) {
+    notified = false;
+    console.error("platform user added but notification failed", { email, error });
+  }
+  return { ...user, notified };
+}
+
+async function setPlatformUserEnabled(caller: Caller, email: string, enabled: boolean): Promise<PlatformUser> {
+  const target = email.trim().toLowerCase();
+  if (target === caller.email) throw new HttpError(400, "You cannot disable your own account.");
+  const user = (await listPlatformUsers()).find((u) => u.email === target);
+  if (!user) throw new HttpError(404, `No platform account ${target}.`);
+  if (user.role === "root") throw new HttpError(400, "The root account cannot be disabled.");
+
+  await cognito.send(
+    enabled
+      ? new AdminEnableUserCommand({ UserPoolId: BMS_USER_POOL_ID, Username: target })
+      : new AdminDisableUserCommand({ UserPoolId: BMS_USER_POOL_ID, Username: target }),
+  );
+  await dynamo.send(
+    new UpdateCommand({
+      TableName: CORE_TABLE,
+      Key: { PK: PLATFORM_PK, SK: `USER#${target}` },
+      UpdateExpression: "SET #s = :s, updatedAt = :at, updatedBy = :by",
+      ExpressionAttributeNames: { "#s": "status" },
+      ExpressionAttributeValues: { ":s": enabled ? "active" : "disabled", ":at": new Date().toISOString(), ":by": caller.email },
+    }),
+  );
+  return { ...user, status: enabled ? "active" : "disabled" };
+}
+
 export async function handler(event: LambdaFunctionURLEvent): Promise<LambdaFunctionURLResult> {
   try {
-    await requireRoot(event);
+    const caller = await requirePlatform(event);
 
     const method = event.requestContext.http.method;
     const path = event.rawPath.replace(/^\/api/, "").replace(/\/+$/, "") || "/";
@@ -314,6 +448,24 @@ export async function handler(event: LambdaFunctionURLEvent): Promise<LambdaFunc
         throw new HttpError(400, "Malformed request.");
       }
       return json(201, { organisation: await createOrganisation(body) });
+    }
+    if (path === "/users" && method === "GET") {
+      return json(200, { users: await listPlatformUsers() });
+    }
+    if (path === "/users" && method === "POST") {
+      let body: Record<string, unknown>;
+      try {
+        const raw = event.isBase64Encoded ? Buffer.from(event.body ?? "", "base64").toString("utf8") : (event.body ?? "");
+        body = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        throw new HttpError(400, "Malformed request.");
+      }
+      return json(201, { user: await createPlatformUser(caller, body) });
+    }
+    const toggle = path.match(/^\/users\/([^/]+)\/(enable|disable)$/);
+    if (toggle && method === "POST") {
+      const user = await setPlatformUserEnabled(caller, decodeURIComponent(toggle[1]), toggle[2] === "enable");
+      return json(200, { user });
     }
     const demoCases = path.match(/^\/organisations\/([^/]+)\/demo\/cases$/);
     if (demoCases && method === "GET") {
