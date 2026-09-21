@@ -298,6 +298,14 @@ export class StaticSiteStack extends cdk.Stack {
     for (const table of Object.values(config.sourceTables)) table.grantReadData(fn);
     config.documentsBucket.grantRead(fn);
     config.openAiSecret.grantRead(fn);
+    // Owners and administrators create, disable and enable their
+    // organisation's users - in the portal pool only.
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['cognito-idp:AdminCreateUser', 'cognito-idp:AdminDisableUser', 'cognito-idp:AdminEnableUser', 'cognito-idp:AdminGetUser'],
+        resources: [config.portalUserPool.userPoolArn],
+      }),
+    );
 
     const url = fn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
 

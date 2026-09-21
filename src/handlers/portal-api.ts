@@ -7,6 +7,9 @@
  *   GET  /api/cases                    every case for my organisation, assessed
  *   GET  /api/cases/{id}               one case: assessment, evidence, documents, decisions, summary
  *   POST /api/cases/{id}/decisions     record a human decision
+ *   GET  /api/users                    the organisation's users (owner and administrators)
+ *   POST /api/users                    create an administrator or reviewer
+ *   POST /api/users/{email}/disable    stop an account signing in; POST .../enable reverses it
  *
  * Everything but /contact needs an ID token from the portal user pool, sent
  * as x-id-token (CloudFront overwrites Authorization for function URLs). The
@@ -18,8 +21,14 @@
  * own table.
  */
 
+import {
+  AdminCreateUserCommand,
+  AdminDisableUserCommand,
+  AdminEnableUserCommand,
+  CognitoIdentityProviderClient,
+} from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
@@ -46,6 +55,7 @@ const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
   marshallOptions: { removeUndefinedValues: true },
 });
 const s3 = new S3Client({});
+const cognito = new CognitoIdentityProviderClient({});
 const fx = new LiveFxRates();
 
 /** The proof of concept has one case type. A tenant setting will choose later. */
@@ -296,6 +306,132 @@ async function recordDecision(caller: Caller, caseId: string, body: Record<strin
   return decision;
 }
 
+// --- users --------------------------------------------------------------------------
+//
+// An organisation's owner and administrators manage its users. Accounts live
+// in the portal user pool; a record of each also lives in the core table so
+// listing them is one Query and their role and status are readable without
+// touching Cognito. Users are disabled, never deleted: decisions keep their
+// attribution and a disabled account cannot sign in.
+
+type UserRole = "owner" | "administrator" | "reviewer";
+const CREATABLE_ROLES: ReadonlySet<UserRole> = new Set(["administrator", "reviewer"]);
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+interface OrganisationUser {
+  readonly email: string;
+  readonly name: string;
+  readonly role: UserRole;
+  readonly status: "active" | "disabled";
+  readonly createdAt: string;
+  readonly createdBy?: string;
+}
+
+function requireAdministrator(caller: Caller): void {
+  if (caller.role !== "owner" && caller.role !== "administrator") {
+    throw new HttpError(403, "Only the owner and administrators manage users.");
+  }
+}
+
+async function listUsers(caller: Caller): Promise<OrganisationUser[]> {
+  const organisation = (await organisationOf(caller)) as Organisation & { ownerEmail?: string; createdAt?: string };
+  const result = await dynamo.send(
+    new QueryCommand({
+      TableName: CORE_TABLE,
+      KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+      ExpressionAttributeValues: { ":pk": `ORG#${caller.organisationId}`, ":sk": "USER#" },
+    }),
+  );
+  const users = (result.Items ?? []).map((item) => {
+    const { PK: _pk, SK: _sk, ...user } = item;
+    return user as unknown as OrganisationUser;
+  });
+  // The owner was created from the BMS; older organisations have no record
+  // of them here, so the profile stands in.
+  if (organisation.ownerEmail && !users.some((u) => u.email === organisation.ownerEmail)) {
+    users.unshift({
+      email: organisation.ownerEmail,
+      name: "Owner",
+      role: "owner",
+      status: "active",
+      createdAt: organisation.createdAt ?? "",
+    });
+  }
+  const rank: Record<UserRole, number> = { owner: 0, administrator: 1, reviewer: 2 };
+  return users.sort((a, b) => rank[a.role] - rank[b.role] || a.email.localeCompare(b.email));
+}
+
+async function createUser(caller: Caller, body: Record<string, unknown>): Promise<OrganisationUser> {
+  requireAdministrator(caller);
+  const email = String(body.email ?? "").trim().toLowerCase();
+  const name = String(body.name ?? "").trim();
+  const role = String(body.role ?? "") as UserRole;
+  if (!EMAIL_RE.test(email) || email.length > 320) throw new HttpError(400, "Email address looks invalid.");
+  if (!name || name.length > 120) throw new HttpError(400, "Name is required (up to 120 characters).");
+  if (!CREATABLE_ROLES.has(role)) throw new HttpError(400, "Role must be administrator or reviewer.");
+
+  const user: OrganisationUser = {
+    email,
+    name,
+    role,
+    status: "active",
+    createdAt: new Date().toISOString(),
+    createdBy: caller.email,
+  };
+  // No welcome message: it would carry a temporary password, and there are
+  // no passwords - their first email from ReconFlow is a sign-in code.
+  try {
+    await cognito.send(
+      new AdminCreateUserCommand({
+        UserPoolId: process.env.PORTAL_USER_POOL_ID!,
+        Username: email,
+        MessageAction: "SUPPRESS",
+        UserAttributes: [
+          { Name: "email", Value: email },
+          { Name: "email_verified", Value: "true" },
+          { Name: "name", Value: name },
+          { Name: "custom:org", Value: caller.organisationId },
+          { Name: "custom:role", Value: role },
+        ],
+      }),
+    );
+  } catch (error) {
+    if ((error as { name?: string }).name === "UsernameExistsException") {
+      throw new HttpError(409, `${email} already has a ReconFlow account; an email can belong to one organisation only.`);
+    }
+    throw error;
+  }
+  await dynamo.send(
+    new PutCommand({ TableName: CORE_TABLE, Item: { PK: `ORG#${caller.organisationId}`, SK: `USER#${email}`, ...user } }),
+  );
+  return user;
+}
+
+async function setUserEnabled(caller: Caller, email: string, enabled: boolean): Promise<OrganisationUser> {
+  requireAdministrator(caller);
+  const target = email.trim().toLowerCase();
+  if (target === caller.email) throw new HttpError(400, "You cannot disable your own account.");
+  const users = await listUsers(caller);
+  const user = users.find((u) => u.email === target);
+  if (!user) throw new HttpError(404, `No user ${target} in your organisation.`);
+  if (user.role === "owner") throw new HttpError(400, "The owner's account cannot be disabled.");
+
+  const command = enabled
+    ? new AdminEnableUserCommand({ UserPoolId: process.env.PORTAL_USER_POOL_ID!, Username: target })
+    : new AdminDisableUserCommand({ UserPoolId: process.env.PORTAL_USER_POOL_ID!, Username: target });
+  await cognito.send(command);
+  await dynamo.send(
+    new UpdateCommand({
+      TableName: CORE_TABLE,
+      Key: { PK: `ORG#${caller.organisationId}`, SK: `USER#${target}` },
+      UpdateExpression: "SET #s = :s, updatedAt = :at, updatedBy = :by",
+      ExpressionAttributeNames: { "#s": "status" },
+      ExpressionAttributeValues: { ":s": enabled ? "active" : "disabled", ":at": new Date().toISOString(), ":by": caller.email },
+    }),
+  );
+  return { ...user, status: enabled ? "active" : "disabled" };
+}
+
 // --- routing ------------------------------------------------------------------------
 
 export async function handler(event: LambdaFunctionURLEvent): Promise<LambdaFunctionURLResult> {
@@ -323,6 +459,18 @@ export async function handler(event: LambdaFunctionURLEvent): Promise<LambdaFunc
       const body = parseBody(event);
       if (!body) throw new HttpError(400, "Malformed request.");
       return json(201, { decision: await recordDecision(caller, decodeURIComponent(decide[1]), body) });
+    }
+    if (path === "/users" && method === "GET") {
+      return json(200, { users: await listUsers(caller) });
+    }
+    if (path === "/users" && method === "POST") {
+      const body = parseBody(event);
+      if (!body) throw new HttpError(400, "Malformed request.");
+      return json(201, { user: await createUser(caller, body) });
+    }
+    const toggle = path.match(/^\/users\/([^/]+)\/(enable|disable)$/);
+    if (toggle && method === "POST") {
+      return json(200, { user: await setUserEnabled(caller, decodeURIComponent(toggle[1]), toggle[2] === "enable") });
     }
     throw new HttpError(404, "Not found.");
   } catch (error) {

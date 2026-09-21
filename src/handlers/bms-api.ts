@@ -182,6 +182,15 @@ async function createOrganisation(body: Record<string, unknown>): Promise<Organi
     throw error;
   }
 
+  // The owner is the organisation's first user; the portal lists users from
+  // these records.
+  await dynamo.send(
+    new PutCommand({
+      TableName: CORE_TABLE,
+      Item: { PK: `ORG#${organisationId}`, SK: `USER#${ownerEmail}`, email: ownerEmail, name: ownerName, role: "owner", status: "active", createdAt, createdBy: "bms" },
+    }),
+  );
+
   return { organisationId, name, baseCurrency, ownerEmail, createdAt };
 }
 
