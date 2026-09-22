@@ -6,7 +6,16 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
-import { MAIL_FROM_ADDRESS, MAIL_FROM_NAME, PREFIX, SES_IDENTITY_DOMAIN, SES_REGION } from './account';
+import {
+  DEMO_ACCOUNT_EMAILS,
+  DEMO_ACCOUNTS,
+  DEMO_SIGN_IN_CODE,
+  MAIL_FROM_ADDRESS,
+  MAIL_FROM_NAME,
+  PREFIX,
+  SES_IDENTITY_DOMAIN,
+  SES_REGION,
+} from './account';
 
 /**
  * Who a user is to ReconFlow.
@@ -82,6 +91,9 @@ export class AuthStack extends cdk.Stack {
       FROM_ADDRESS: MAIL_FROM_ADDRESS,
       FROM_NAME: MAIL_FROM_NAME,
       PRODUCT_NAME: MAIL_FROM_NAME,
+      // Fixed code, no email. Empty list = the feature is off entirely.
+      DEMO_ACCOUNT_EMAILS: DEMO_ACCOUNT_EMAILS.join(','),
+      DEMO_SIGN_IN_CODE: DEMO_ACCOUNT_EMAILS.length ? DEMO_SIGN_IN_CODE : '',
     });
     const verifyAuthChallengeResponse = trigger('VerifyChallenge', 'verify-challenge');
 
@@ -187,6 +199,27 @@ export class AuthStack extends cdk.Stack {
         { name: 'custom:role', value: 'root' satisfies UserRole },
       ],
     });
+
+    // Demonstration accounts, declared in lib/account.ts. They live in the
+    // pools like any other account - the only thing special about them is
+    // that the create-challenge trigger gives them a fixed code and sends no
+    // email. Emptying DEMO_ACCOUNTS and deploying removes them.
+    for (const account of DEMO_ACCOUNTS) {
+      const pool = account.surface === 'bms' ? this.bmsUserPool : this.portalUserPool;
+      const organisationId = 'organisationId' in account ? account.organisationId : 'wingtheidea';
+      new cognito.CfnUserPoolUser(this, `DemoUser${account.surface === 'bms' ? 'Bms' : 'Portal'}`, {
+        userPoolId: pool.userPoolId,
+        username: account.email,
+        messageAction: 'SUPPRESS',
+        userAttributes: [
+          { name: 'email', value: account.email },
+          { name: 'email_verified', value: 'true' },
+          { name: 'name', value: account.name },
+          { name: 'custom:org', value: organisationId },
+          { name: 'custom:role', value: account.role satisfies UserRole },
+        ],
+      });
+    }
 
     new cdk.CfnOutput(this, 'PortalClientId', {
       value: this.portalClient.userPoolClientId,

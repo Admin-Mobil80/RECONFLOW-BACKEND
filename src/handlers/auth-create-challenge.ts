@@ -6,6 +6,12 @@
  * Every InitiateAuth starts a fresh session and therefore a fresh code, which
  * is what "send a new code" in the UI relies on. Cognito's session validity
  * (three minutes by default) is the code's lifetime.
+ *
+ * Demonstration accounts (DEMO_ACCOUNTS in lib/account.ts) are the exception:
+ * a fixed code, no email, so their credentials can be published to a prospect.
+ * Anyone who knows such an address can sign in as it, which is why the list is
+ * declared in one place and the accounts are pointed at representative data
+ * only. An empty list means no account gets this treatment.
  */
 
 import { randomInt } from "node:crypto";
@@ -16,6 +22,14 @@ const ses = new SESv2Client({ region: process.env.SES_REGION });
 const FROM_HEADER = `${process.env.FROM_NAME} <${process.env.FROM_ADDRESS}>`;
 const PRODUCT = process.env.PRODUCT_NAME ?? "ReconFlow";
 const CODE_TTL_MINUTES = 3;
+
+const DEMO_EMAILS = new Set(
+  (process.env.DEMO_ACCOUNT_EMAILS ?? "")
+    .split(",")
+    .map((address) => address.trim().toLowerCase())
+    .filter(Boolean),
+);
+const DEMO_CODE = process.env.DEMO_SIGN_IN_CODE ?? "";
 
 function maskEmail(email: string): string {
   const [local, domain = ""] = email.split("@");
@@ -31,6 +45,16 @@ export async function handler(event: CreateAuthChallengeTriggerEvent): Promise<C
     event.response.privateChallengeParameters = { code: "no-user" };
     event.response.publicChallengeParameters = { destination: "***" };
     event.response.challengeMetadata = "EMAIL_CODE";
+    return event;
+  }
+
+  // A demonstration account: hand Cognito the fixed code and send nothing.
+  // The address is published, so an email would go to a mailbox that is not
+  // ours and tell the recipient nothing they do not already have.
+  if (DEMO_CODE && DEMO_EMAILS.has(email.toLowerCase())) {
+    event.response.privateChallengeParameters = { code: DEMO_CODE };
+    event.response.publicChallengeParameters = { destination: email };
+    event.response.challengeMetadata = `CODE-${DEMO_CODE}`;
     return event;
   }
 

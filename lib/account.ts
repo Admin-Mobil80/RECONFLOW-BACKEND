@@ -40,6 +40,29 @@ export const MAIL_FROM_NAME = 'ReconFlow';
 /** Where enquiries from the public site are delivered. */
 export const ENQUIRIES_TO_ADDRESS = 'riyad@mobil80.com';
 
+/**
+ * Demonstration accounts: they sign in with a FIXED code and are sent no
+ * email, so credentials can be handed to a prospect for review.
+ *
+ * Read this before adding one. Anybody who knows the address can sign in as
+ * that account, from anywhere, forever — it is a published credential, not a
+ * weak one. Only ever point a demonstration account at an organisation whose
+ * data is representative, and remove it before that organisation holds
+ * anything real.
+ *
+ * To withdraw every demonstration account: empty this list and deploy. The
+ * accounts stop working immediately, and CloudFormation removes them from
+ * the pools on the same deploy.
+ */
+export const DEMO_SIGN_IN_CODE = '000000';
+export const DEMO_ACCOUNTS = [
+  { email: 'abc@xyz.com', name: 'ADB Demonstration', surface: 'portal', organisationId: 'adb', role: 'reviewer' },
+  { email: 'abc@xyz.com', name: 'ADB Demonstration', surface: 'bms', role: 'administrator' },
+] as const;
+
+/** Just the addresses, for the auth trigger that must not email them. */
+export const DEMO_ACCOUNT_EMAILS = [...new Set(DEMO_ACCOUNTS.map((a) => a.email))];
+
 /** Pre-existing public hosted zone for wingtheidea.com. */
 export const ZONE_NAME = 'wingtheidea.com';
 export const HOSTED_ZONE_ID = 'Z008500039SSWYWL7HKJI';
