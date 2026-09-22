@@ -55,10 +55,20 @@ export const ENQUIRIES_TO_ADDRESS = 'riyad@mobil80.com';
  * the pools on the same deploy.
  */
 export const DEMO_SIGN_IN_CODE = '000000';
-export const DEMO_ACCOUNTS = [
-  { email: 'abc@xyz.com', name: 'ADB Demonstration', surface: 'portal', organisationId: 'adb', role: 'reviewer' },
+
+export interface DemoAccount {
+  readonly email: string;
+  readonly name: string;
+  readonly surface: 'portal' | 'bms';
+  /** Portal accounts only — a BMS account belongs to the platform, not an organisation. */
+  readonly organisationId?: string;
+  readonly role: 'owner' | 'administrator' | 'reviewer';
+}
+
+export const DEMO_ACCOUNTS: readonly DemoAccount[] = [
+  { email: 'abc@xyz.com', name: 'ADB Demonstration', surface: 'portal', organisationId: 'adb', role: 'administrator' },
   { email: 'abc@xyz.com', name: 'ADB Demonstration', surface: 'bms', role: 'administrator' },
-] as const;
+];
 
 /** Just the addresses, for the auth trigger that must not email them. */
 export const DEMO_ACCOUNT_EMAILS = [...new Set(DEMO_ACCOUNTS.map((a) => a.email))];

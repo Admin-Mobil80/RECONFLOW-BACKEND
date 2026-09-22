@@ -206,7 +206,7 @@ export class AuthStack extends cdk.Stack {
     // email. Emptying DEMO_ACCOUNTS and deploying removes them.
     for (const account of DEMO_ACCOUNTS) {
       const pool = account.surface === 'bms' ? this.bmsUserPool : this.portalUserPool;
-      const organisationId = 'organisationId' in account ? account.organisationId : 'wingtheidea';
+      const organisationId = account.organisationId ?? 'wingtheidea';
       new cognito.CfnUserPoolUser(this, `DemoUser${account.surface === 'bms' ? 'Bms' : 'Portal'}`, {
         userPoolId: pool.userPoolId,
         username: account.email,
