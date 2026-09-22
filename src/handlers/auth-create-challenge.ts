@@ -53,7 +53,10 @@ export async function handler(event: CreateAuthChallengeTriggerEvent): Promise<C
   // ours and tell the recipient nothing they do not already have.
   if (DEMO_CODE && DEMO_EMAILS.has(email.toLowerCase())) {
     event.response.privateChallengeParameters = { code: DEMO_CODE };
-    event.response.publicChallengeParameters = { destination: email };
+    // "demo" tells the sign-in screen not to claim an email was sent. Public
+    // challenge parameters reach the client, so the screen learns this from
+    // here rather than carrying its own copy of the list.
+    event.response.publicChallengeParameters = { destination: email, demo: "true" };
     event.response.challengeMetadata = `CODE-${DEMO_CODE}`;
     return event;
   }
