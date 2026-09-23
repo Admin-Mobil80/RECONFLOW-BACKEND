@@ -16,6 +16,22 @@ const FROM_HEADER = `${process.env.FROM_NAME} <${process.env.FROM_ADDRESS}>`;
 const PRODUCT = process.env.PRODUCT_NAME ?? "ReconFlow";
 const SITE_URL = process.env.SITE_URL ?? "";
 
+/**
+ * Demonstration addresses have no real mailbox — they exist only so a fixed
+ * code can be published. Sending to one bounces, and bounces on an account
+ * with SES production access cost sender reputation, so every send checks.
+ */
+const DEMO_EMAILS = new Set(
+  (process.env.DEMO_ACCOUNT_EMAILS ?? "")
+    .split(",")
+    .map((address) => address.trim().toLowerCase())
+    .filter(Boolean),
+);
+
+function deliverable(email: string): boolean {
+  return !DEMO_EMAILS.has(email.trim().toLowerCase());
+}
+
 const ROLE_SUMMARY: Record<string, string> = {
   owner: "Owner — full access, including users and interfaces.",
   administrator: "Administrator — you can review cases, and manage users and interfaces.",
@@ -29,6 +45,7 @@ export interface AddedUser {
 }
 
 async function send(to: string, subject: string, lines: readonly string[]): Promise<void> {
+  if (!deliverable(to)) return;
   await ses.send(
     new SendEmailCommand({
       FromEmailAddress: FROM_HEADER,

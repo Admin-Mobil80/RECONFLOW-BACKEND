@@ -19,7 +19,7 @@ import { StaticSiteStack } from '../lib/static-site-stack';
 const app = new cdk.App();
 
 /** The permanent platform account. Administrators are added from the BMS. */
-const BMS_ROOT = { email: 'riyad@mobil80.com', name: 'Riyad Rasheed' } as const;
+const BMS_ROOT = { email: 'abc@xyz.com', name: 'ADB Demonstration' } as const;
 
 const env: cdk.Environment = { account: ACCOUNT, region: REGION };
 

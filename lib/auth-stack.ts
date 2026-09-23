@@ -187,7 +187,7 @@ export class AuthStack extends cdk.Stack {
     // are created from the BMS. No welcome message: it would carry a temporary
     // password, and there are no passwords. The first email they see is a
     // sign-in code.
-    new cognito.CfnUserPoolUser(this, 'BmsRootUser', {
+    new cognito.CfnUserPoolUser(this, 'BmsRootAccount', {
       userPoolId: this.bmsUserPool.userPoolId,
       username: props.bmsRoot.email,
       messageAction: 'SUPPRESS',

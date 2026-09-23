@@ -66,12 +66,20 @@ export interface DemoAccount {
 }
 
 export const DEMO_ACCOUNTS: readonly DemoAccount[] = [
-  { email: 'abc@xyz.com', name: 'ADB Demonstration', surface: 'portal', organisationId: 'adb', role: 'administrator' },
-  { email: 'abc@xyz.com', name: 'ADB Demonstration', surface: 'bms', role: 'administrator' },
+  { email: 'abc@xyz.com', name: 'ADB Demonstration', surface: 'portal', organisationId: 'adb', role: 'owner' },
 ];
 
-/** Just the addresses, for the auth trigger that must not email them. */
-export const DEMO_ACCOUNT_EMAILS = [...new Set(DEMO_ACCOUNTS.map((a) => a.email))];
+/**
+ * Addresses that sign in with the fixed code and are never emailed — by the
+ * auth trigger, and by every notification the APIs send. Listed explicitly
+ * rather than derived from DEMO_ACCOUNTS, because a demonstration address can
+ * also be a root or owner account, which is created elsewhere.
+ *
+ * xyz.com is not a domain we own. Mail to it would bounce, and bounces on an
+ * account with SES production access cost sender reputation, so nothing is
+ * ever sent to an address in this list.
+ */
+export const DEMO_ACCOUNT_EMAILS = ['abc@xyz.com'];
 
 /** Pre-existing public hosted zone for wingtheidea.com. */
 export const ZONE_NAME = 'wingtheidea.com';

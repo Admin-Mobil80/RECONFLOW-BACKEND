@@ -15,6 +15,7 @@ import * as targets from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 import {
+  DEMO_ACCOUNT_EMAILS,
   GITHUB_OIDC_PROVIDER_ARN,
   HOSTED_ZONE_ID,
   PREFIX,
@@ -280,6 +281,7 @@ export class StaticSiteStack extends cdk.Stack {
         TO_ADDRESS: config.contact.toAddress,
         PRODUCT_NAME: config.contact.fromName,
         SITE_URL: `https://${domainName}`,
+        DEMO_ACCOUNT_EMAILS: DEMO_ACCOUNT_EMAILS.join(','),
         CORE_TABLE: config.coreTable.tableName,
         DOCUMENTS_BUCKET: config.documentsBucket.bucketName,
         SOURCE_TABLES: JSON.stringify(sourceTables),
@@ -347,6 +349,7 @@ export class StaticSiteStack extends cdk.Stack {
         FROM_NAME: config.contact.fromName,
         PRODUCT_NAME: config.contact.fromName,
         SITE_URL: `https://${domainName}`,
+        DEMO_ACCOUNT_EMAILS: DEMO_ACCOUNT_EMAILS.join(','),
         CORE_TABLE: config.coreTable.tableName,
         PORTAL_USER_POOL_ID: config.portalUserPool.userPoolId,
         BMS_USER_POOL_ID: config.bmsUserPool.userPoolId,
