@@ -69,7 +69,7 @@ export type DemoEvent =
       /** Defaults to the voucher number. Anything else stages a reference mismatch. */
       readonly referenceNo?: string;
       readonly confirmed: boolean;
-      readonly channel: TreasuryReceipt["channel"];
+      readonly channel?: TreasuryReceipt["channel"];
       readonly withBankAdvice: boolean;
     }
   | {
@@ -285,7 +285,9 @@ export async function applyEvent(event: DemoEvent, reader: SourceReader, now: Da
         amountReceived: amount,
         currency,
         receivedDate: at,
-        channel: event.channel,
+        // The form always sends one; a direct API call need not, and a record
+        // saying the money arrived "via undefined" helps nobody.
+        channel: event.channel ?? "wire",
         confirmed: event.confirmed,
         confirmationDate: event.confirmed ? at : undefined,
         bankAdviceDocumentId,
@@ -308,7 +310,7 @@ export async function applyEvent(event: DemoEvent, reader: SourceReader, now: Da
         records,
         documents,
         creditNoteNo: creditNote.creditNoteNo,
-        summary: `Treasury ${event.confirmed ? "confirmed" : "recorded"} receipt ${receiptNo}: ${money(amount, currency)} via ${event.channel} against reference ${referenceNo}${event.withBankAdvice ? ", with bank advice" : ""}.`,
+        summary: `Treasury ${event.confirmed ? "confirmed" : "recorded"} receipt ${receiptNo}: ${money(amount, currency)} via ${receipt.channel} against reference ${referenceNo}${event.withBankAdvice ? ", with bank advice" : ""}.`,
       };
     }
 
