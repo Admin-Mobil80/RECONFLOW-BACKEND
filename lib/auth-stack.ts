@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import type * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -28,6 +29,8 @@ import {
 export type UserRole = 'root' | 'owner' | 'administrator' | 'reviewer';
 
 export interface AuthStackProps extends cdk.StackProps {
+  /** Where the activity log lives; sign-ins are appended to it. */
+  readonly coreTable: dynamodb.ITable;
   /** The single account that exists in the BMS pool from the first deploy. */
   readonly bmsRoot: { readonly email: string; readonly name: string };
   /**
@@ -95,7 +98,11 @@ export class AuthStack extends cdk.Stack {
       DEMO_ACCOUNT_EMAILS: DEMO_ACCOUNT_EMAILS.join(','),
       DEMO_SIGN_IN_CODE: DEMO_ACCOUNT_EMAILS.length ? DEMO_SIGN_IN_CODE : '',
     });
-    const verifyAuthChallengeResponse = trigger('VerifyChallenge', 'verify-challenge');
+    const verifyAuthChallengeResponse = trigger('VerifyChallenge', 'verify-challenge', {
+      // A successful challenge is a sign-in; it is recorded in the activity log.
+      CORE_TABLE: props.coreTable.tableName,
+    });
+    props.coreTable.grantWriteData(verifyAuthChallengeResponse);
 
     // Send only as the configured address; the account has other identities.
     createAuthChallenge.addToRolePolicy(

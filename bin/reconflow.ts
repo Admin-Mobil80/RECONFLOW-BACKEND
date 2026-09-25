@@ -36,6 +36,7 @@ const data = new DataStack(app, 'reconflow-data', {
 const importOnly = process.env.RECONFLOW_IMPORT_ONLY === '1';
 
 const auth = new AuthStack(app, 'reconflow-auth', {
+  coreTable: data.coreTable,
   env,
   stackName: `${PREFIX}-auth`,
   synthesizer: importOnly ? new cdk.CliCredentialsStackSynthesizer() : undefined,

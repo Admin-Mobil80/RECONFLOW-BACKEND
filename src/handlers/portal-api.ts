@@ -34,6 +34,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import type { LambdaFunctionURLEvent, LambdaFunctionURLResult } from "aws-lambda";
 import { assessWithEvidence, convertToBase, type Assessment, type CaseTypeModule } from "../domain/assessment";
+import { recordActivity } from "../domain/audit";
 import { DynamoSourceReader } from "../domain/dynamo-reader";
 import { LiveFxRates } from "../domain/fx-live";
 import { narrate } from "../domain/narrator";
@@ -304,6 +305,15 @@ async function recordDecision(caller: Caller, caseId: string, body: Record<strin
       Item: { PK: decisionPk(caller.organisationId, caseId), SK: `DECISION#${at}`, ...decision },
     }),
   );
+  await recordActivity(dynamo, CORE_TABLE, {
+    at,
+    action: "decision.recorded",
+    actor: caller.email,
+    surface: "portal",
+    scope: caller.organisationId,
+    subject: caseId,
+    summary: `${caller.name ?? caller.email} recorded "${decision.actionLabel}" on ${caseId}`,
+  });
   return decision;
 }
 
@@ -410,6 +420,16 @@ async function createUser(caller: Caller, body: Record<string, unknown>): Promis
 
   // The account exists now. A notification that will not send is worth
   // reporting, not worth undoing the account over.
+  await recordActivity(dynamo, CORE_TABLE, {
+    at: user.createdAt,
+    action: "user.added",
+    actor: caller.email,
+    surface: "portal",
+    scope: caller.organisationId,
+    subject: email,
+    summary: `${caller.name ?? caller.email} added ${name} (${email}) as ${role}`,
+  });
+
   let notified = true;
   try {
     const organisation = (await organisationOf(caller)) as Organisation & { ownerEmail?: string };
@@ -448,6 +468,14 @@ async function setUserEnabled(caller: Caller, email: string, enabled: boolean): 
       ExpressionAttributeValues: { ":s": enabled ? "active" : "disabled", ":at": new Date().toISOString(), ":by": caller.email },
     }),
   );
+  await recordActivity(dynamo, CORE_TABLE, {
+    action: enabled ? "user.restored" : "user.suspended",
+    actor: caller.email,
+    surface: "portal",
+    scope: caller.organisationId,
+    subject: target,
+    summary: `${caller.name ?? caller.email} ${enabled ? "restored" : "suspended"} ${target}`,
+  });
   return { ...user, status: enabled ? "active" : "disabled" };
 }
 

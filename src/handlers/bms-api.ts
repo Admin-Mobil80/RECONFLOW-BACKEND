@@ -24,6 +24,7 @@ import { DynamoDBDocumentClient, PutCommand, QueryCommand, UpdateCommand } from 
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import type { LambdaFunctionURLEvent, LambdaFunctionURLResult } from "aws-lambda";
+import { readActivity, recordActivity } from "../domain/audit";
 import { isKnownCurrency } from "../domain/currencies";
 import { itemsForDocument, itemsForRecord } from "../domain/dynamo-keys";
 import { DynamoSourceReader } from "../domain/dynamo-reader";
@@ -134,7 +135,7 @@ async function listOrganisations(): Promise<OrganisationSummary[]> {
   }));
 }
 
-async function createOrganisation(body: Record<string, unknown>): Promise<OrganisationSummary> {
+async function createOrganisation(caller: Caller, body: Record<string, unknown>): Promise<OrganisationSummary> {
   const text = (key: string) => String(body[key] ?? "").trim();
   const organisationId = text("organisationId").toLowerCase();
   const name = text("name");
@@ -215,6 +216,15 @@ async function createOrganisation(body: Record<string, unknown>): Promise<Organi
     }),
   );
 
+  await recordActivity(dynamo, CORE_TABLE, {
+    at: createdAt,
+    action: "organisation.created",
+    actor: caller.email,
+    surface: "bms",
+    scope: organisationId,
+    subject: organisationId,
+    summary: `${caller.name ?? caller.email} created organisation ${name} (${organisationId}), owner ${ownerEmail}`,
+  });
   return { organisationId, name, baseCurrency, ownerEmail, createdAt };
 }
 
@@ -265,7 +275,7 @@ async function listDemoCases(organisationId: string) {
   return { cases: cases.sort((a, b) => a.creditNoteNo.localeCompare(b.creditNoteNo)), fundSources, suppliers, reasons: CREDIT_NOTE_REASONS };
 }
 
-async function injectEvent(organisationId: string, body: Record<string, unknown>) {
+async function injectEvent(caller: Caller, organisationId: string, body: Record<string, unknown>) {
   const reader = demoReader(organisationId);
   const event = body as unknown as DemoEvent;
   if (!event || typeof event.type !== "string") throw new HttpError(400, "An event type is required.");
@@ -298,6 +308,14 @@ async function injectEvent(organisationId: string, body: Record<string, unknown>
   for (const doc of outcome.documents) {
     await s3.send(new PutObjectCommand({ Bucket: DOCUMENTS_BUCKET, Key: doc.s3Key, Body: buildPdf(doc.lines), ContentType: doc.contentType }));
   }
+  await recordActivity(dynamo, CORE_TABLE, {
+    action: "demo.event",
+    actor: caller.email,
+    surface: "bms",
+    scope: organisationId,
+    subject: event.type,
+    summary: `${caller.name ?? caller.email} injected a ${event.type} event: ${outcome.summary}`,
+  });
   return {
     summary: outcome.summary,
     creditNoteNo: outcome.creditNoteNo,
@@ -306,7 +324,7 @@ async function injectEvent(organisationId: string, body: Record<string, unknown>
   };
 }
 
-async function resetDemo(organisationId: string, clearDecisions: boolean) {
+async function resetDemo(caller: Caller, organisationId: string, clearDecisions: boolean) {
   demoReader(organisationId);
   const result = await lambda.send(
     new InvokeCommand({
@@ -316,6 +334,13 @@ async function resetDemo(organisationId: string, clearDecisions: boolean) {
   );
   const payload = JSON.parse(Buffer.from(result.Payload ?? new Uint8Array()).toString("utf8") || "{}") as Record<string, unknown>;
   if (result.FunctionError) throw new HttpError(500, `Reset failed: ${String(payload.errorMessage ?? result.FunctionError)}`);
+  await recordActivity(dynamo, CORE_TABLE, {
+    action: "demo.reset",
+    actor: caller.email,
+    surface: "bms",
+    scope: organisationId,
+    summary: `${caller.name ?? caller.email} reset the demonstration data for ${organisationId}${clearDecisions ? ", clearing decisions" : ""}`,
+  });
   return payload;
 }
 
@@ -394,6 +419,15 @@ async function createPlatformUser(caller: Caller, body: Record<string, unknown>)
     throw error;
   }
   await dynamo.send(new PutCommand({ TableName: CORE_TABLE, Item: { PK: PLATFORM_PK, SK: `USER#${email}`, ...user } }));
+  await recordActivity(dynamo, CORE_TABLE, {
+    at: user.createdAt,
+    action: "user.added",
+    actor: caller.email,
+    surface: "bms",
+    scope: "platform",
+    subject: email,
+    summary: `${caller.name ?? caller.email} added platform administrator ${name} (${email})`,
+  });
 
   let notified = true;
   try {
@@ -426,6 +460,14 @@ async function setPlatformUserEnabled(caller: Caller, email: string, enabled: bo
       ExpressionAttributeValues: { ":s": enabled ? "active" : "disabled", ":at": new Date().toISOString(), ":by": caller.email },
     }),
   );
+  await recordActivity(dynamo, CORE_TABLE, {
+    action: enabled ? "user.restored" : "user.suspended",
+    actor: caller.email,
+    surface: "bms",
+    scope: "platform",
+    subject: target,
+    summary: `${caller.name ?? caller.email} ${enabled ? "restored" : "suspended"} platform account ${target}`,
+  });
   return { ...user, status: enabled ? "active" : "disabled" };
 }
 
@@ -447,7 +489,14 @@ export async function handler(event: LambdaFunctionURLEvent): Promise<LambdaFunc
       } catch {
         throw new HttpError(400, "Malformed request.");
       }
-      return json(201, { organisation: await createOrganisation(body) });
+      return json(201, { organisation: await createOrganisation(caller, body) });
+    }
+    // The activity log is the root's alone: it spans every organisation, and a
+    // platform administrator should not read one customer's activity from
+    // another's console.
+    if (path === "/audit" && method === "GET") {
+      if (caller.role !== "root") throw new HttpError(403, "Only the platform root may read the activity log.");
+      return json(200, { entries: await readActivity(dynamo, CORE_TABLE) });
     }
     if (path === "/users" && method === "GET") {
       return json(200, { users: await listPlatformUsers() });
@@ -480,7 +529,7 @@ export async function handler(event: LambdaFunctionURLEvent): Promise<LambdaFunc
       } catch {
         throw new HttpError(400, "Malformed request.");
       }
-      return json(201, await injectEvent(decodeURIComponent(demoEvent[1]), body));
+      return json(201, await injectEvent(caller, decodeURIComponent(demoEvent[1]), body));
     }
     const demoReset = path.match(/^\/organisations\/([^/]+)\/demo\/reset$/);
     if (demoReset && method === "POST") {
@@ -491,7 +540,7 @@ export async function handler(event: LambdaFunctionURLEvent): Promise<LambdaFunc
       } catch {
         throw new HttpError(400, "Malformed request.");
       }
-      return json(200, await resetDemo(decodeURIComponent(demoReset[1]), body.clearDecisions === true));
+      return json(200, await resetDemo(caller, decodeURIComponent(demoReset[1]), body.clearDecisions === true));
     }
     throw new HttpError(404, "Not found.");
   } catch (error) {
