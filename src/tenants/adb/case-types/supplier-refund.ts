@@ -20,6 +20,7 @@ import {
   type CaseException,
   type CaseTypeModule,
   type ClassificationAssessment,
+  type ClassificationBreakdownLine,
   type ClassificationSignal,
   type EvidenceItem,
   type EvidencePackage,
@@ -36,6 +37,7 @@ import type {
   CashRoomReceipt,
   Contract,
   CreditNote,
+  FundShare,
   FundSource,
   Invoice,
   ProcessingOutcome,
@@ -69,6 +71,20 @@ const STAGES: readonly StageDefinition[] = [
 /** Cross-currency amounts are compared within this, because rates move between receipt and review. */
 const CROSS_CURRENCY_TOLERANCE = 0.03;
 
+/**
+ * A shortfall up to this is a bank charge, not an unpaid balance. The Loan
+ * Disbursement Handbook: "a money transfer fee or bank charge deducted from the
+ * refund amount … may be charged to the loan account." Converted to the credit
+ * note's currency at the assessment's rates.
+ */
+export const BANK_CHARGE_ALLOWANCE: Money = { amount: 50, currency: "USD" };
+
+const ARRANGEMENT_LABELS: Record<string, string> = {
+  "pro-rata": "pro rata",
+  "front-loading": "front-loaded",
+  "category-ratio": "category-ratio",
+};
+
 // --- a typed view over the evidence -------------------------------------------
 
 interface CaseView {
@@ -77,10 +93,13 @@ interface CaseView {
   readonly invoices: readonly SourceRecord<Invoice>[];
   readonly contract?: Contract;
   readonly fundSources: ReadonlyMap<string, FundSource>;
-  /** Funds the two systems say paid the invoice. One entry when they agree. */
+  /** Every fund either system says paid the invoice. */
   readonly payingFundIds: readonly string[];
   readonly payingFunds: readonly FundSource[];
+  /** The two systems record different funding splits for the invoice. */
   readonly fundConflict: boolean;
+  /** The split both systems agree on; absent while they disagree. */
+  readonly split?: readonly FundShare[];
   readonly voucher?: RefundVoucher;
   readonly treasuryStatus?: TreasuryVoucherStatus;
   /** The Treasury receipt whose reference is this case's voucher. */
@@ -96,6 +115,64 @@ interface CaseView {
   readonly creditInBase?: Money;
 }
 
+function splitOf(invoice: Invoice): FundShare[] {
+  return invoice.funding && invoice.funding.length > 0
+    ? [...invoice.funding]
+    : [{ fundSourceId: invoice.fundSourceId, percent: 100 }];
+}
+
+/** Order-independent, so two systems listing the same split agree. */
+function splitKey(split: readonly FundShare[]): string {
+  return split.map((share) => `${share.fundSourceId}:${share.percent}`).sort().join("|");
+}
+
+/**
+ * Divides an amount by the split, to the cent, with every line summing exactly
+ * to the whole: rounding differences go to the largest share, because a
+ * finance reader will add the lines up.
+ */
+function allocate(total: Money, split: readonly FundShare[]): { share: FundShare; amount: Money; percent: number }[] {
+  const sum = split.reduce((acc, share) => acc + share.percent, 0) || 1;
+  const lines = split.map((share) => ({
+    share,
+    percent: round2((share.percent / sum) * 100),
+    amount: { amount: round2((total.amount * share.percent) / sum), currency: total.currency },
+  }));
+  const remainder = round2(total.amount - lines.reduce((acc, l) => acc + l.amount.amount, 0));
+  if (remainder !== 0 && lines.length > 0) {
+    const largest = lines.reduce((a, b) => (b.share.percent > a.share.percent ? b : a));
+    largest.amount = { amount: round2(largest.amount.amount + remainder), currency: total.currency };
+  }
+  return lines;
+}
+
+function describeSplit(split: readonly FundShare[], funds: ReadonlyMap<string, FundSource>): string {
+  return split.map((share) => `${share.percent}% from ${funds.get(share.fundSourceId)?.name ?? share.fundSourceId}`).join(" and ");
+}
+
+/**
+ * The bank-charge allowance in the given currency, or undefined when there is
+ * no rate to convert it with — in which case amounts must match exactly.
+ */
+function allowanceIn(currency: CurrencyCode, evidence: EvidencePackage): number | undefined {
+  const inBase = convertToBase(BANK_CHARGE_ALLOWANCE, evidence.fx);
+  if (!inBase) return undefined;
+  if (currency === evidence.fx.base) return inBase.amount;
+  const rate = evidence.fx.rates[currency];
+  return rate ? inBase.amount / rate.rateToBase : undefined;
+}
+
+/** A same-currency shortfall small enough to be bank charges, if there is one. */
+function bankChargeOf(v: CaseView, evidence: EvidencePackage): Money | undefined {
+  if (!v.received || !v.matchedReceipt || v.received.currency !== v.creditNote.currency) return undefined;
+  const shortfall = round2(v.creditNote.amount - v.received.amount);
+  if (shortfall <= 0) return undefined;
+  const allowance = allowanceIn(v.creditNote.currency, evidence);
+  return allowance !== undefined && shortfall <= allowance
+    ? { amount: shortfall, currency: v.creditNote.currency }
+    : undefined;
+}
+
 function view(evidence: EvidencePackage): CaseView {
   const creditNote = evidence.anchor.attributes as CreditNote;
   const invoices = itemsInRole<Invoice>(evidence, "invoice");
@@ -103,7 +180,11 @@ function view(evidence: EvidencePackage): CaseView {
   const fundSources = new Map(
     itemsInRole<FundSource>(evidence, "fund-source").map((r) => [r.attributes.fundSourceId, r.attributes]),
   );
-  const payingFundIds = [...new Set(invoices.map((i) => i.attributes.fundSourceId))];
+  // Each system's record of how the invoice was paid. A cofinanced invoice
+  // names several funds with their shares; a plain one names one fund.
+  const splits = invoices.map((i) => splitOf(i.attributes));
+  const fundConflict = new Set(splits.map(splitKey)).size > 1;
+  const payingFundIds = [...new Set(splits.flat().map((share) => share.fundSourceId))];
   const payingFunds = payingFundIds.map((id) => fundSources.get(id)).filter((f): f is FundSource => !!f);
   const voucher = firstInRole<RefundVoucher>(evidence, "refund-voucher")?.attributes;
   const receipts = itemsInRole<TreasuryReceipt>(evidence, "treasury-receipt").map((r) => r.attributes);
@@ -125,7 +206,8 @@ function view(evidence: EvidencePackage): CaseView {
     fundSources,
     payingFundIds,
     payingFunds,
-    fundConflict: payingFundIds.length > 1,
+    fundConflict,
+    split: fundConflict ? undefined : splits[0],
     voucher,
     treasuryStatus: firstInRole<TreasuryVoucherStatus>(evidence, "treasury-voucher-status")?.attributes,
     matchedReceipt,
@@ -356,9 +438,20 @@ function amountCheck(v: CaseView, evidence: EvidencePackage): ReadinessCheck {
 
   if (v.received.currency === credit.currency) {
     const diff = round2(v.received.amount - credit.amount);
-    return diff === 0
-      ? { id, label, passed: true, detail: `Received ${money(v.received)}, equal to the credit note.`, evidence: receiptRef }
-      : {
+    if (diff === 0) {
+      return { id, label, passed: true, detail: `Received ${money(v.received)}, equal to the credit note.`, evidence: receiptRef };
+    }
+    const fee = bankChargeOf(v, evidence);
+    if (fee) {
+      return {
+        id,
+        label,
+        passed: true,
+        detail: `Received ${money(v.received)} against a credit note of ${money(credit)} — ${money(fee)} short, within the ${money(BANK_CHARGE_ALLOWANCE)} allowance for bank charges deducted in transit.`,
+        evidence: receiptRef,
+      };
+    }
+    return {
           id,
           label,
           passed: false,
@@ -401,7 +494,10 @@ function classify(evidence: EvidencePackage, _readiness: ReadinessAssessment): C
   let rule: string;
   if (trustFund) {
     classification = "trust-fund-refund";
-    rule = `Invoice ${v.creditNote.invoiceNo} was paid from ${trustFund.name}, a trust fund${trustFund.donor ? ` financed by ${trustFund.donor}` : ""}; the refund must return to that fund.`;
+    rule =
+      v.split && v.split.length > 1
+        ? `Invoice ${v.creditNote.invoiceNo} was paid ${describeSplit(v.split, v.fundSources)}. ${trustFund.name} is a trust fund${trustFund.donor ? ` financed by ${trustFund.donor}` : ""}, so its share of the refund must return to it; the rest returns to the other funds in proportion.`
+        : `Invoice ${v.creditNote.invoiceNo} was paid from ${trustFund.name}, a trust fund${trustFund.donor ? ` financed by ${trustFund.donor}` : ""}; the refund must return to that fund.`;
   } else if (currencyMismatch) {
     const got = v.received ?? { amount: v.cashRoomReceipt!.amount, currency: v.cashRoomReceipt!.currency };
     classification = "currency-purchase-required";
@@ -498,6 +594,37 @@ function classify(evidence: EvidencePackage, _readiness: ReadinessAssessment): C
     confidence: Math.round((satisfied / total) * 100),
     rule,
     signals,
+    ...(v.split && v.split.length > 1 ? { breakdown: refundAllocation(v) } : {}),
+  };
+}
+
+/** "Nordic Climate Partners'" — not "Partners's". */
+function possessive(name: string): string {
+  return name.endsWith("s") ? `${name}'` : `${name}'s`;
+}
+
+function fundNote(fund: FundSource): string {
+  if (fund.type !== "trust-fund") return fund.type === "ordinary-capital" ? "Ordinary resources" : "Special fund";
+  const holder = fund.administration === "held-by-cofinancier" ? "held by the cofinancier" : "held by ADB";
+  return `Trust fund${fund.donor ? ` · ${fund.donor}` : ""} · ${holder}`;
+}
+
+/** A cofinanced refund, divided in the proportions the invoice was paid. */
+function refundAllocation(v: CaseView) {
+  const credit: Money = { amount: v.creditNote.amount, currency: v.creditNote.currency };
+  const arrangement = v.contract?.cofinancingArrangement;
+  return {
+    title: "Refund allocation",
+    basis: `${arrangement ? `${ARRANGEMENT_LABELS[arrangement] ?? arrangement} cofinancing. ` : ""}The refund returns to each fund in the proportion that fund paid invoice ${v.creditNote.invoiceNo}.`,
+    lines: allocate(credit, v.split!).map((line): ClassificationBreakdownLine => {
+      const fund = v.fundSources.get(line.share.fundSourceId);
+      return {
+        label: fund?.name ?? line.share.fundSourceId,
+        amount: line.amount,
+        percent: line.percent,
+        note: fund ? fundNote(fund) : undefined,
+      };
+    }),
   };
 }
 
@@ -568,6 +695,18 @@ function detectExceptions(
     });
   }
 
+  const fee = bankChargeOf(v, evidence);
+  if (fee) {
+    out.push({
+      id: "bank-charges",
+      severity: "info",
+      title: "Bank charges deducted",
+      detail: `Received ${money(v.received!)} against a credit note of ${money({ amount: v.creditNote.amount, currency: v.creditNote.currency })}; ${money(fee)} was deducted in transit, within the ${money(BANK_CHARGE_ALLOWANCE)} allowance for bank charges.`,
+      actionRequired: `Charge the ${money(fee)} bank fee to the account being credited rather than pursuing it as a shortfall.`,
+      evidence: [v.matchedReceipt!.receiptNo],
+    });
+  }
+
   if (v.received && v.received.currency !== v.creditNote.currency) {
     out.push({
       id: "currency-mismatch",
@@ -588,6 +727,16 @@ function detectExceptions(
       actionRequired: "Resolve which fund paid the invoice with both system owners before processing.",
       evidence: v.invoices.map((i) => `${i.sourceId}/${i.recordId}`),
     });
+  } else if (v.split && v.split.length > 1) {
+    const arrangement = v.contract?.cofinancingArrangement;
+    out.push({
+      id: "cofinanced-refund",
+      severity: "info",
+      title: "Cofinanced refund",
+      detail: `Invoice ${v.creditNote.invoiceNo} was paid ${describeSplit(v.split, v.fundSources)}${arrangement ? ` under ${ARRANGEMENT_LABELS[arrangement] ?? arrangement} cofinancing` : ""}. Both systems agree on the split.`,
+      actionRequired: "Credit each fund its share of the refund, as set out in the refund allocation.",
+      evidence: [v.creditNote.contractNo, v.creditNote.invoiceNo],
+    });
   } else if ((v.contract?.fundSourceIds.length ?? 0) > 1) {
     out.push({
       id: "multi-funded-contract",
@@ -600,15 +749,29 @@ function detectExceptions(
   }
 
   if (classification.classification === "trust-fund-refund") {
-    const fund = v.payingFunds.find((f) => f.type === "trust-fund")!;
-    out.push({
-      id: "trust-fund-routing",
-      severity: "info",
-      title: "Trust Fund refund",
-      detail: `The refund belongs to ${fund.name}${fund.donor ? ` (${fund.donor})` : ""}, not to ordinary resources.`,
-      actionRequired: `Route the refund to ${fund.name} and record it against the donor contribution.`,
-      evidence: [fund.fundSourceId],
-    });
+    const credit: Money = { amount: v.creditNote.amount, currency: v.creditNote.currency };
+    // With an agreed split, each trust fund is owed its own share; while the
+    // systems disagree there is no split to divide by, so the whole refund is
+    // named and the conflict exception blocks it anyway.
+    const owed = v.split
+      ? allocate(credit, v.split)
+          .map((line) => ({ fund: v.fundSources.get(line.share.fundSourceId), amount: line.amount, percent: line.percent }))
+          .filter((line): line is { fund: FundSource; amount: Money; percent: number } => line.fund?.type === "trust-fund")
+      : [{ fund: v.payingFunds.find((f) => f.type === "trust-fund")!, amount: credit, percent: 100 }];
+    for (const { fund, amount, percent } of owed) {
+      const share = percent < 100 ? ` — ${percent}% of the refund` : "";
+      out.push({
+        id: owed.length > 1 ? `trust-fund-routing-${fund.fundSourceId}` : "trust-fund-routing",
+        severity: "info",
+        title: "Trust Fund refund",
+        detail: `${fund.name}${fund.donor ? ` (${fund.donor})` : ""} is owed ${money(amount)}${share}, not ordinary resources.`,
+        actionRequired:
+          fund.administration === "held-by-cofinancier"
+            ? `Return ${money(amount)} to ${fund.donor ?? fund.name} directly: the fund is held by the cofinancier, not by ADB.`
+            : `Credit ${money(amount)} to ${fund.name} and record it against ${fund.donor ? possessive(fund.donor) : "the donor's"} contribution.`,
+        evidence: [fund.fundSourceId],
+      });
+    }
   }
 
   if (v.voucher && !v.matchedReceipt?.confirmed) {
@@ -690,11 +853,13 @@ function summaryFacts(
   facts.push(
     `Credit note ${cn.creditNoteNo} for ${money({ amount: cn.amount, currency: cn.currency })} was issued on ${day(cn.issuedDate)} against invoice ${cn.invoiceNo} (contract ${cn.contractNo}) by ${v.contract?.supplierName ?? cn.supplierId}. Reason: ${cn.reason}.`,
   );
-  if (v.payingFunds.length === 1) {
+  if (v.fundConflict) {
+    facts.push(`Procurement and Disbursement disagree on which fund paid invoice ${cn.invoiceNo}: ${v.payingFunds.map((f) => f.name).join(" versus ")}.`);
+  } else if (v.split && v.split.length > 1) {
+    facts.push(`Invoice ${cn.invoiceNo} was cofinanced: paid ${describeSplit(v.split, v.fundSources)}.`);
+  } else if (v.payingFunds.length === 1) {
     const f = v.payingFunds[0];
     facts.push(`Invoice ${cn.invoiceNo} was paid from ${f.name} (${f.type}${f.donor ? `, financed by ${f.donor}` : ""}).`);
-  } else if (v.fundConflict) {
-    facts.push(`Procurement and Disbursement disagree on which fund paid invoice ${cn.invoiceNo}: ${v.payingFunds.map((f) => f.name).join(" versus ")}.`);
   }
   if (v.voucher) {
     facts.push(`Refund voucher ${v.voucher.voucherNo} was raised on ${day(v.voucher.raisedDate)} for an ${v.voucher.refundMethod} refund via ${v.voucher.refundChannel}; its status is ${v.voucher.status}.`);
@@ -729,6 +894,13 @@ function summaryFacts(
       : `Not ready. Checks that failed: ${failedChecks.map((c) => c.label).join("; ")}.`,
   );
   facts.push(`Recommended classification: ${classification.label} (${classification.confidence}% confidence). ${classification.rule}`);
+  if (classification.breakdown) {
+    facts.push(
+      `Refund allocation: ${classification.breakdown.lines
+        .map((l) => `${money(l.amount)}${l.percent !== undefined ? ` (${l.percent}%)` : ""} to ${l.label}`)
+        .join("; ")}.`,
+    );
+  }
   for (const e of exceptions) facts.push(`${e.title}: ${e.detail} Action required: ${e.actionRequired}`);
   return facts;
 }

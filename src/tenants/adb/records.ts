@@ -52,6 +52,14 @@ export const ADB_ORGANISATION: Organisation = {
 
 export type FundSourceType = "ordinary-capital" | "special-fund" | "trust-fund";
 
+/**
+ * Who holds a cofinancier's money (Loan Disbursement Handbook, Cofinancing
+ * Operations). Held by ADB: entrusted to ADB, which pays from it and takes
+ * refunds back into it. Held by the cofinancier: ADB only advises the
+ * cofinancier to pay, so that share of a refund goes back to the cofinancier.
+ */
+export type FundAdministration = "held-by-adb" | "held-by-cofinancier";
+
 export interface FundSource {
   readonly fundSourceId: string;
   readonly name: string;
@@ -59,7 +67,24 @@ export interface FundSource {
   readonly currency: CurrencyCode;
   /** Trust funds are financed by a donor, which is who a refund ultimately belongs to. */
   readonly donor?: string;
+  /** Meaningful for cofinanced and trust funds; ADB's own resources are always held by ADB. */
+  readonly administration?: FundAdministration;
 }
+
+/** One fund's part in paying an invoice. */
+export interface FundShare {
+  readonly fundSourceId: string;
+  /** Of the invoice amount. An invoice's shares sum to 100. */
+  readonly percent: number;
+}
+
+/**
+ * How a cofinanced project draws on its funds (Loan Disbursement Handbook,
+ * Cofinancing Operations): in proportion, cofinancing first, or by a ratio
+ * set per expenditure category. Recorded for context; a refund follows the
+ * split the invoice was actually paid in, whichever arrangement produced it.
+ */
+export type CofinancingArrangement = "pro-rata" | "front-loading" | "category-ratio";
 
 export interface Contract {
   readonly contractNo: string;
@@ -70,6 +95,7 @@ export interface Contract {
   readonly totalAmount: number;
   /** More than one entry makes the contract multi-funded. */
   readonly fundSourceIds: readonly string[];
+  readonly cofinancingArrangement?: CofinancingArrangement;
   readonly signedDate: Timestamp;
 }
 
@@ -79,8 +105,13 @@ export interface Invoice {
   readonly supplierId: string;
   readonly amount: number;
   readonly currency: CurrencyCode;
-  /** The fund that actually paid this invoice. */
+  /** The fund that paid this invoice — or, for a cofinanced invoice, the lead fund. */
   readonly fundSourceId: string;
+  /**
+   * How the payment was actually split, when more than one fund paid it.
+   * Absent means fundSourceId paid all of it.
+   */
+  readonly funding?: readonly FundShare[];
   readonly status: "open" | "paid" | "partially-paid";
   readonly paidDate?: Timestamp;
   readonly paidVia?: "electronic" | "cheque";

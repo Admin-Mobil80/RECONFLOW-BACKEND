@@ -16,8 +16,10 @@ import {
   type AdbDocumentKind,
   type AdbSourceId,
   type CashRoomReceipt,
+  type CofinancingArrangement,
   type Contract,
   type CreditNote,
+  type FundShare,
   type FundSource,
   type Invoice,
   type ProcessingOutcome,
@@ -58,6 +60,7 @@ const FUND_SOURCES: readonly FundSource[] = [
     type: "trust-fund",
     currency: "USD",
     donor: "Nordic Climate Partners",
+    administration: "held-by-adb",
   },
   {
     fundSourceId: "FS-TF-RC",
@@ -65,6 +68,7 @@ const FUND_SOURCES: readonly FundSource[] = [
     type: "trust-fund",
     currency: "EUR",
     donor: "European Development Consortium",
+    administration: "held-by-cofinancier",
   },
 ];
 
@@ -105,6 +109,9 @@ interface CaseSpec {
   readonly invoiceFund: string;
   /** As Disbursement records it — differs only in the conflict scenario. */
   readonly disbursementInvoiceFund?: string;
+  /** A cofinanced invoice: how the payment was split. Both systems record it. */
+  readonly invoiceFunding?: readonly FundShare[];
+  readonly cofinancing?: CofinancingArrangement;
   readonly currency: string;
   readonly invoiceAmount: number;
   readonly creditAmount: number;
@@ -303,6 +310,46 @@ const SCENARIOS: readonly CaseSpec[] = [
     cashRoom: null,
     documents: { creditNote: true, bankAdvice: true },
   },
+  {
+    seq: 11,
+    title: "Cofinanced refund split between ordinary resources and a trust fund",
+    demonstrates: "Trust Fund Refund on a cofinanced invoice: the refund is apportioned 70/30, as the invoice was paid",
+    supplier: SUPPLIERS_BY_KEY.meridian,
+    contractFunds: ["FS-OCR", "FS-TF-CR"],
+    invoiceFund: "FS-OCR",
+    invoiceFunding: [
+      { fundSourceId: "FS-OCR", percent: 70 },
+      { fundSourceId: "FS-TF-CR", percent: 30 },
+    ],
+    cofinancing: "pro-rata",
+    currency: "USD",
+    invoiceAmount: 90000,
+    creditAmount: 15000,
+    creditDaysAgo: 8,
+    reason: "Scope or survey area reduced",
+    voucher: { method: "electronic", channel: "bank-transfer", daysAgo: 6, status: "receipted" },
+    treasury: { confirmed: true, daysAgo: 2, channel: "wire" },
+    cashRoom: null,
+    documents: { creditNote: true, bankAdvice: true },
+    outcome: { status: "in-progress", note: "Awaiting Control Team review" },
+  },
+  {
+    seq: 12,
+    title: "Refund received net of bank charges",
+    demonstrates: "Bank charges: USD 25 deducted in transit is a fee to book, not a shortfall to chase - the case is ready",
+    supplier: SUPPLIERS_BY_KEY.anand,
+    contractFunds: ["FS-OCR"],
+    invoiceFund: "FS-OCR",
+    currency: "USD",
+    invoiceAmount: 48000,
+    creditAmount: 7200,
+    creditDaysAgo: 7,
+    reason: "Training module delivered remotely",
+    voucher: { method: "electronic", channel: "bank-transfer", daysAgo: 5, status: "receipted" },
+    treasury: { confirmed: true, daysAgo: 1, channel: "wire", amount: 7175 },
+    cashRoom: null,
+    documents: { creditNote: true, bankAdvice: true },
+  },
 ];
 
 // --- generation ---------------------------------------------------------------
@@ -386,6 +433,7 @@ function buildCase(spec: CaseSpec, now: Date): { records: SourceRecord[]; docume
     currency: spec.currency,
     totalAmount: spec.invoiceAmount * 4,
     fundSourceIds: spec.contractFunds,
+    ...(spec.cofinancing ? { cofinancingArrangement: spec.cofinancing } : {}),
     signedDate: contractSigned,
   };
   const contractRefs = { contractNo, supplierId };
@@ -397,6 +445,7 @@ function buildCase(spec: CaseSpec, now: Date): { records: SourceRecord[]; docume
     amount: spec.invoiceAmount,
     currency: spec.currency,
     fundSourceId,
+    ...(spec.invoiceFunding ? { funding: spec.invoiceFunding } : {}),
     status: "paid",
     paidDate: invoicePaid,
     paidVia: "electronic",

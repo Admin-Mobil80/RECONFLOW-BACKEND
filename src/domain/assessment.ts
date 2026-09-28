@@ -113,6 +113,25 @@ export interface ClassificationSignal {
   readonly detail: string;
 }
 
+/**
+ * How a recommendation divides, when it does — for a refund, how much goes to
+ * each fund. Lines always sum to the whole; the case type guarantees it.
+ */
+export interface ClassificationBreakdownLine {
+  readonly label: string;
+  readonly amount: Money;
+  /** Percentage of the whole, when the division is proportional. */
+  readonly percent?: number;
+  readonly note?: string;
+}
+
+export interface ClassificationBreakdown {
+  readonly title: string;
+  readonly lines: readonly ClassificationBreakdownLine[];
+  /** Where the division comes from, in plain words. */
+  readonly basis?: string;
+}
+
 export interface ClassificationAssessment {
   /** Case-type vocabulary, e.g. `trust-fund-refund`. */
   readonly classification: string;
@@ -122,6 +141,8 @@ export interface ClassificationAssessment {
   /** The rule that fired, in plain words. */
   readonly rule: string;
   readonly signals: readonly ClassificationSignal[];
+  /** Present when the recommendation divides between destinations. */
+  readonly breakdown?: ClassificationBreakdown;
 }
 
 export type ExceptionSeverity = "info" | "warning" | "blocking";
