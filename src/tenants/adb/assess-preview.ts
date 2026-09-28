@@ -5,6 +5,7 @@
  */
 
 import { assess } from "../../domain/assessment";
+import { FALLBACK } from "../../domain/fx-live";
 import { InMemorySourceReader, StaticFxRates } from "../../domain/in-memory";
 import { supplierRefund } from "./case-types/supplier-refund";
 import { ADB_ORGANISATION } from "./records";
@@ -14,8 +15,9 @@ async function main() {
   const now = new Date();
   const seed = buildAdbSeed(now);
   const reader = new InMemorySourceReader(seed.records, seed.documents);
-  // Indicative rates for a local run; production uses a live provider.
-  const fx = new StaticFxRates("USD", { PHP: 56.0, EUR: 0.92, INR: 83.5 }, now.toISOString());
+  // The engine's own fallback table, which the seed also defaults to, so an
+  // offline run agrees with itself. Production uses a live provider.
+  const fx = new StaticFxRates("USD", FALLBACK.USD, now.toISOString());
 
   const anchors = seed.records.filter(
     (r) => r.sourceId === supplierRefund.anchor.sourceId && r.recordType === supplierRefund.anchor.recordType,

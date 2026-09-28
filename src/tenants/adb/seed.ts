@@ -10,8 +10,10 @@
  * donors are fictional.
  */
 
+import { FALLBACK } from "../../domain/fx-live";
 import type { DocumentRecord, SourceRecord, Timestamp } from "../../domain/types";
 import {
+  ADB_ORGANISATION,
   ADB_ORGANISATION_ID,
   type AdbDocumentKind,
   type AdbSourceId,
@@ -92,7 +94,11 @@ interface TreasurySpec {
   readonly confirmed: boolean;
   readonly daysAgo: number;
   readonly channel: TreasuryReceipt["channel"];
-  /** Defaults to the credit note amount and currency. */
+  /**
+   * Defaults to the credit note amount. With a currency other than the credit
+   * note's and no amount, it is the credit note's value converted at the
+   * seeding rates.
+   */
   readonly amount?: number;
   readonly currency?: string;
   /** Defaults to the voucher number. Set something else to seed a mismatch. */
@@ -184,7 +190,9 @@ const SCENARIOS: readonly CaseSpec[] = [
     creditDaysAgo: 10,
     reason: "Survey area reduced",
     voucher: { method: "electronic", channel: "bank-transfer", daysAgo: 7, status: "receipted" },
-    treasury: { confirmed: true, daysAgo: 2, channel: "wire", amount: 268800, currency: "PHP" },
+    // The credit note's value in PHP at the rate of the day the seed loads, so
+    // the amount check agrees with the rates the engine will then use.
+    treasury: { confirmed: true, daysAgo: 2, channel: "wire", currency: "PHP" },
     cashRoom: null,
     documents: { creditNote: true, bankAdvice: true },
   },
@@ -411,7 +419,7 @@ function money(amount: number, currency: string): string {
   return `${amount.toLocaleString("en-US", { minimumFractionDigits: 2 })} ${currency}`;
 }
 
-function buildCase(spec: CaseSpec, now: Date): { records: SourceRecord[]; documents: SeedDocument[] } {
+function buildCase(spec: CaseSpec, now: Date, rates: SeedRates): { records: SourceRecord[]; documents: SeedDocument[] } {
   const records: SourceRecord[] = [];
   const documents: SeedDocument[] = [];
   const n = pad(spec.seq);
@@ -544,8 +552,8 @@ function buildCase(spec: CaseSpec, now: Date): { records: SourceRecord[]; docume
 
   if (spec.treasury) {
     const received = daysAgo(now, spec.treasury.daysAgo);
-    const amount = spec.treasury.amount ?? spec.creditAmount;
     const currency = spec.treasury.currency ?? spec.currency;
+    const amount = spec.treasury.amount ?? convertAt(rates, spec.creditAmount, spec.currency, currency);
     const referenceNo = spec.treasury.referenceNo ?? voucherNo;
     const receiptNo = `TR-2026-${n}`;
 
@@ -688,7 +696,34 @@ function buildCase(spec: CaseSpec, now: Date): { records: SourceRecord[]; docume
   return { records, documents };
 }
 
-export function buildAdbSeed(now: Date): SeedData {
+/**
+ * Rates into the organisation's base currency (base per 1 unit), the same
+ * shape the engine's FX snapshot uses. Pass the live rates when loading for
+ * real; the default is the engine's own fallback table, so an offline run and
+ * an offline assessment agree.
+ */
+export type SeedRates = Readonly<Record<string, number>>;
+
+const FALLBACK_SEED_RATES: SeedRates = Object.fromEntries(
+  Object.entries(FALLBACK[ADB_ORGANISATION.baseCurrency] ?? {}).map(([currency, perBase]) => [currency, 1 / perBase]),
+);
+
+/** Currencies the scenarios need a rate for, besides the base. */
+export function seedCurrencies(): string[] {
+  const all = SCENARIOS.flatMap((spec) => [spec.currency, spec.treasury?.currency, spec.cashRoom?.currency]);
+  return [...new Set(all.filter((c): c is string => !!c && c !== ADB_ORGANISATION.baseCurrency))];
+}
+
+function convertAt(rates: SeedRates, amount: number, from: string, to: string): number {
+  if (from === to) return amount;
+  const base = ADB_ORGANISATION.baseCurrency;
+  const fromRate = from === base ? 1 : (rates[from] ?? FALLBACK_SEED_RATES[from]);
+  const toRate = to === base ? 1 : (rates[to] ?? FALLBACK_SEED_RATES[to]);
+  if (!fromRate || !toRate) throw new Error(`No seeding rate between ${from} and ${to}`);
+  return Math.round((amount * fromRate) / toRate);
+}
+
+export function buildAdbSeed(now: Date, rates: SeedRates = FALLBACK_SEED_RATES): SeedData {
   const records: SourceRecord[] = [];
   const documents: SeedDocument[] = [];
 
@@ -704,7 +739,7 @@ export function buildAdbSeed(now: Date): SeedData {
   }
 
   for (const spec of SCENARIOS) {
-    const built = buildCase(spec, now);
+    const built = buildCase(spec, now, rates);
     records.push(...built.records);
     documents.push(...built.documents);
   }

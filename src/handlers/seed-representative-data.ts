@@ -21,8 +21,9 @@ import type { CdkCustomResourceEvent, CdkCustomResourceResponse } from "aws-lamb
 import { itemsForDocument, itemsForRecord, type KeyedItem } from "../domain/dynamo-keys";
 import { deleteItemsWithPrefix, putItems } from "../domain/dynamo-writer";
 import { buildPdf } from "../lib/mini-pdf";
+import { LiveFxRates } from "../domain/fx-live";
 import { ADB_ORGANISATION } from "../tenants/adb/records";
-import { buildAdbSeed } from "../tenants/adb/seed";
+import { buildAdbSeed, seedCurrencies } from "../tenants/adb/seed";
 
 interface SeedProperties {
   readonly SeedVersion: string;
@@ -44,7 +45,12 @@ const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
 const s3 = new S3Client({});
 
 async function loadSeed(props: SeedProperties): Promise<{ records: number; items: number; documents: number; scenarios: number }> {
-  const seed = buildAdbSeed(new Date());
+  // Seed cross-currency amounts at today's rates - the ones the engine will
+  // assess them with - so the currency scenario matches within tolerance
+  // instead of passing or failing on how far rates have moved since the
+  // seed was written. Falls back to the engine's own table, as it does.
+  const fx = await new LiveFxRates().rates(ADB_ORGANISATION.baseCurrency, seedCurrencies());
+  const seed = buildAdbSeed(new Date(), Object.fromEntries(fx.map((r) => [r.currency, r.rateToBase])));
   if (seed.organisationId !== props.OrganisationId) {
     throw new Error(`Seed is for ${seed.organisationId}, configured for ${props.OrganisationId}`);
   }
