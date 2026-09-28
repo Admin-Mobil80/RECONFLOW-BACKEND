@@ -64,6 +64,11 @@ const STAGES: readonly StageDefinition[] = [
   { id: "awaiting-treasury", label: "Awaiting Treasury confirmation", staleAfterBusinessDays: 5 },
   { id: "ready-for-review", label: "Ready for review", staleAfterBusinessDays: 3 },
   { id: "under-review", label: "Under review", staleAfterBusinessDays: 3 },
+  // Set by a person's decision rather than by the evidence. An escalation or an
+  // information request that nobody follows up is exactly what should surface.
+  { id: "awaiting-information", label: "Awaiting information", staleAfterBusinessDays: 5 },
+  { id: "escalated", label: "Escalated", staleAfterBusinessDays: 3 },
+  // A decided case has been dealt with; it has no clock.
   { id: "decided", label: "Decided" },
   { id: "closed", label: "Closed" },
 ];

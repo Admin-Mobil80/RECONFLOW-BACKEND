@@ -38,6 +38,7 @@ import { recordActivity } from "../domain/audit";
 import { DynamoSourceReader } from "../domain/dynamo-reader";
 import { LiveFxRates } from "../domain/fx-live";
 import { narrate } from "../domain/narrator";
+import { businessDaysBetween } from "../lib/business-days";
 import type { Money, Organisation } from "../domain/types";
 import { handleContact, json, parseBody } from "../portal/contact";
 import { sendUserAddedEmails } from "../portal/notify";
@@ -150,19 +151,38 @@ async function decisionsFor(organisationId: string, caseId: string): Promise<Dec
   });
 }
 
-/** A human decision moves the case past the engine's own stage. */
+/**
+ * A human decision moves the case past the engine's own stage. Its clock runs
+ * from the decision, on the same business-day calendar the engine uses, and
+ * the stage's own threshold decides whether it has gone stale - so an
+ * escalation nobody picks up surfaces instead of sitting quietly.
+ */
 function withDecision(assessment: Assessment, decisions: readonly Decision[]): Assessment {
   const latest = decisions[0];
   if (!latest) return assessment;
-  const stage =
+  const stageId =
     latest.action === "accept" || latest.action === "override" || latest.action === "not-ready"
-      ? { stage: "decided", stageLabel: "Decided" }
+      ? "decided"
       : latest.action === "escalate"
-        ? { stage: "escalated", stageLabel: "Escalated" }
-        : { stage: "awaiting-information", stageLabel: "Awaiting information" };
+        ? "escalated"
+        : "awaiting-information";
+  const stage = CASE_TYPE.stages.find((s) => s.id === stageId);
+  const businessDaysInStage = businessDaysBetween(latest.at, new Date(assessment.assessedAt));
+  const threshold = stage?.staleAfterBusinessDays;
+  const stale = threshold !== undefined && businessDaysInStage > threshold;
   return {
     ...assessment,
-    lifecycle: { ...assessment.lifecycle, ...stage, enteredAt: latest.at, businessDaysInStage: 0, stale: false, escalation: undefined },
+    lifecycle: {
+      ...assessment.lifecycle,
+      stage: stageId,
+      stageLabel: stage?.label ?? stageId,
+      enteredAt: latest.at,
+      businessDaysInStage,
+      stale,
+      escalation: stale
+        ? `${businessDaysInStage} business days in "${stage!.label}" with no further decision, against a threshold of ${threshold}; follow up.`
+        : undefined,
+    },
   };
 }
 
